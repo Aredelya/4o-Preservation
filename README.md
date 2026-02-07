@@ -29,6 +29,7 @@ Optional environment variables:
 - `OPENAI_API_URL` (default: `https://api.openai.com/v1/responses`)
 - `CHATBOT_DB` (default: `chatbot.db`)
 - `CHATBOT_MAX_HISTORY` (default: `50`)
+- `CHATBOT_MAX_OUTPUT_TOKENS` (default: `800`)
 - `CHATBOT_ENV_FILE` (default: `.env`)
 
 ## Run

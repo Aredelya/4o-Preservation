@@ -13,6 +13,7 @@ DB_PATH = os.environ.get("CHATBOT_DB", "chatbot.db")
 API_URL = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/responses")
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
 MAX_HISTORY = int(os.environ.get("CHATBOT_MAX_HISTORY", "50"))
+MAX_OUTPUT_TOKENS = int(os.environ.get("CHATBOT_MAX_OUTPUT_TOKENS", "800"))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
@@ -186,6 +187,7 @@ def call_openai(messages: Iterable[Message]) -> str:
         "input": [
             {"role": message.role, "content": message.content} for message in messages
         ],
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
     }
 
     data = json.dumps(payload).encode("utf-8")
