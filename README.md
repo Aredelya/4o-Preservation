@@ -38,6 +38,23 @@ Optional environment variables:
 python3 app.py
 ```
 
+## Web app (iOS-friendly)
+
+Run a lightweight local web server that shares the same SQLite database as the CLI:
+
+```bash
+python3 web_app.py
+```
+
+Then open `http://<your-pc-ip>:8000` on your iPhone or iPad (same Wi-Fi) to access the synced chats
+and memories. The web UI reads and writes to the same `chatbot.db`, so both the CLI and web app stay
+in sync.
+
+Optional web environment variables:
+
+- `CHATBOT_WEB_HOST` (default: `0.0.0.0`)
+- `CHATBOT_WEB_PORT` (default: `8000`)
+
 ## Commands
 
 - `/new` — start a new conversation
@@ -57,3 +74,4 @@ python3 app.py
 - Conversations are saved to the SQLite file specified by `CHATBOT_DB`.
 - Use `/conversations` to list past chats and `/open <id>` to continue them.
 - The CLI uses simple ANSI colors when run in a TTY.
+- The web app and CLI share the same database for syncing.
