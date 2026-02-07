@@ -50,6 +50,7 @@ ANSI_BLUE = "\033[34m"
 ANSI_GREEN = "\033[32m"
 ANSI_CYAN = "\033[36m"
 ANSI_DIM = "\033[2m"
+ENV_PATH = os.environ.get("CHATBOT_ENV_FILE", ".env")
 
 @dataclass
 class Message:
@@ -235,6 +236,24 @@ def print_banner(conversation_id: str, title: Optional[str]) -> None:
     print(style(f"Conversation: {conversation_id}", ANSI_DIM))
 
 
+def load_env_file(path: str) -> None:
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as env_file:
+            for raw_line in env_file:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except OSError as exc:
+        print(f"Warning: Unable to read env file {path}: {exc}")
+
+
 def print_help() -> None:
     print(
         """
@@ -299,6 +318,7 @@ def handle_memory_command(conn: sqlite3.Connection, args: List[str]) -> None:
 
 
 def main() -> int:
+    load_env_file(ENV_PATH)
     conn = connect_db()
     init_db(conn)
 

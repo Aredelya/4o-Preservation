@@ -17,12 +17,19 @@ A minimal command-line chatbot that recreates the ChatGPT 4o-style experience us
 export OPENAI_API_KEY="your-key-here"
 ```
 
+Alternatively, create a `.env` file in the same directory:
+
+```
+OPENAI_API_KEY=your-key-here
+```
+
 Optional environment variables:
 
 - `OPENAI_MODEL` (default: `gpt-4o`)
 - `OPENAI_API_URL` (default: `https://api.openai.com/v1/responses`)
 - `CHATBOT_DB` (default: `chatbot.db`)
 - `CHATBOT_MAX_HISTORY` (default: `50`)
+- `CHATBOT_ENV_FILE` (default: `.env`)
 
 ## Run
 
