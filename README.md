@@ -31,6 +31,9 @@ Optional environment variables:
 - `CHATBOT_MAX_HISTORY` (default: `50`)
 - `CHATBOT_MAX_OUTPUT_TOKENS` (default: `800`)
 - `CHATBOT_ENV_FILE` (default: `.env`)
+- `CHATBOT_USE_EMBEDDINGS` (default: `1`)
+- `CHATBOT_EMBEDDING_MODEL` (default: `text-embedding-3-small`)
+- `CHATBOT_EMBEDDINGS_TOP_K` (default: `6`)
 
 ## Run
 
@@ -55,6 +58,28 @@ Optional web environment variables:
 - `CHATBOT_WEB_HOST` (default: `0.0.0.0`)
 - `CHATBOT_WEB_PORT` (default: `8000`)
 
+## Hosting on a VPS (public access)
+
+If you want access outside your home network, run the web app on a VPS and expose it with HTTPS.
+A minimal flow:
+
+1. Copy the project to your VPS (or `git clone` the repo).
+2. Set your `OPENAI_API_KEY` (or `.env`) on the VPS.
+3. Start the server so it listens on all interfaces:
+
+```bash
+CHATBOT_WEB_HOST=0.0.0.0 CHATBOT_WEB_PORT=8000 python3 web_app.py
+```
+
+4. Put a reverse proxy (nginx/Caddy) in front to add TLS and a stable domain:
+
+```text
+https://chat.example.com  ->  http://127.0.0.1:8000
+```
+
+Once that’s running, you can open the HTTPS URL from iOS anywhere and it will stay synced with the
+same database on the VPS.
+
 ## Commands
 
 - `/new` — start a new conversation
@@ -75,3 +100,44 @@ Optional web environment variables:
 - Use `/conversations` to list past chats and `/open <id>` to continue them.
 - The CLI uses simple ANSI colors when run in a TTY.
 - The web app and CLI share the same database for syncing.
+
+## FAQ: Are embeddings useful for chatbot memory?
+
+Yes, and this project now supports them. When embeddings are enabled, each memory is vectorized and the
+app retrieves the top-k most semantically relevant memories for each user message before building the
+prompt.
+
+1. Store memory embeddings in `memory_embeddings`.
+2. Embed the incoming user query.
+3. Retrieve top-k similar memories (configured by `CHATBOT_EMBEDDINGS_TOP_K`).
+4. Inject only those memories into context.
+
+Set `CHATBOT_USE_EMBEDDINGS=0` to fall back to injecting all memories.
+
+## Syncing the database between PC and VPS
+
+SQLite isn’t multi-writer across machines, so you can’t live-sync the same file at once. The simplest
+approach is to **sync snapshots** periodically (PC -> VPS or VPS -> PC):
+
+### 1) Create a safe snapshot
+
+```bash
+python3 sync_db.py --source chatbot.db --dest chatbot-backup.db
+```
+
+### 2) Copy it to the other machine
+
+```bash
+# PC -> VPS
+scp chatbot-backup.db user@your-vps:/path/to/chatbot.db
+
+# VPS -> PC
+scp user@your-vps:/path/to/chatbot.db ./chatbot.db
+```
+
+### 3) Restart the app on the target machine
+
+Make sure the CLI/web app is stopped while swapping the file, then restart it.
+
+> Tip: If you want near-real-time syncing, a hosted database (Postgres) or a small API service is
+> a better long-term option. I can help you migrate if you want.

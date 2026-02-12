@@ -463,7 +463,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             with connect_db() as conn:
                 init_db(conn)
                 add_message(conn, conversation_id, Message("user", content))
-                system_prompt = build_system_prompt(conn)
+                system_prompt = build_system_prompt(conn, content)
                 history = get_recent_messages(conn, conversation_id)
                 messages = [Message("system", system_prompt), *history]
                 response_text = call_openai(messages)

@@ -192,7 +192,7 @@ def main() -> int:
             continue
 
         add_message(conn, conversation_id, Message("user", user_input))
-        system_prompt = build_system_prompt(conn)
+        system_prompt = build_system_prompt(conn, user_input)
         history = get_recent_messages(conn, conversation_id)
         messages = [Message("system", system_prompt), *history]
 
