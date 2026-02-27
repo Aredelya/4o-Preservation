@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import sqlite3
 import sys
 from typing import List, Optional
@@ -6,14 +7,15 @@ from typing import List, Optional
 from core import (
     ENV_PATH,
     Message,
-    add_message,
     add_memory,
+    add_message,
     build_system_prompt,
     call_openai,
     clear_memories,
     connect_db,
     conversation_exists,
     create_conversation,
+    create_user_message,
     delete_memory,
     get_conversation_title,
     get_recent_messages,
@@ -23,12 +25,15 @@ from core import (
     load_env_file,
     update_conversation_title,
 )
+
 ANSI_RESET = "\033[0m"
 ANSI_BOLD = "\033[1m"
 ANSI_BLUE = "\033[34m"
 ANSI_GREEN = "\033[32m"
-ANSI_CYAN = "\033[36m"
 ANSI_DIM = "\033[2m"
+TEXT_FILE_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".py", ".log"}
+
+
 def supports_color() -> bool:
     return sys.stdout.isatty()
 
@@ -57,21 +62,18 @@ def print_help() -> None:
     print(
         """
 Commands:
-  /new                     Start a new conversation.
-  /conversations           List saved conversations.
-  /open <id>               Resume a conversation by id.
-  /title <text>            Rename the current conversation.
+  /new                      Start a new conversation.
+  /conversations            List saved conversations.
+  /open <id>                Resume a conversation by id.
+  /title <text>             Rename the current conversation.
   /memory add <text>        Add a long-term memory.
   /memory list              List stored memories.
   /memory delete <id>       Delete a memory by id.
   /memory clear             Delete all memories.
-  /help                    Show this help message.
-  /exit                    Exit the app.
-
-Notes:
-  - Set OPENAI_API_KEY in your environment.
-  - Memories are injected into the system prompt on every request.
-  - Use /conversations and /open to pick up past threads.
+  /image <path> [prompt]    Send an image.
+  /file <path> [prompt]     Send a text file plus optional prompt.
+  /help                     Show this help message.
+  /exit                     Exit the app.
 """
     )
 
@@ -114,6 +116,17 @@ def handle_memory_command(conn: sqlite3.Connection, args: List[str]) -> None:
         print("All memories cleared.")
     else:
         print("Unknown /memory action. Use add, list, delete, or clear.")
+
+
+def send_user_message(conn: sqlite3.Connection, conversation_id: str, user_message: Message, query: str) -> None:
+    history = get_recent_messages(conn, conversation_id)
+    system_prompt = build_system_prompt(conn, query)
+    messages = [Message("system", system_prompt), *history, user_message]
+
+    response_text = call_openai(messages)
+    add_message(conn, conversation_id, user_message)
+    add_message(conn, conversation_id, Message("assistant", response_text))
+    print(f"\nAssistant: {response_text}")
 
 
 def main() -> int:
@@ -187,23 +200,44 @@ def main() -> int:
             if command == "/memory":
                 handle_memory_command(conn, args)
                 continue
+            if command == "/image":
+                if not args:
+                    print("Usage: /image <path> [prompt]")
+                    continue
+                image_path = args[0]
+                prompt = " ".join(args[1:]).strip() or "Please analyze this image."
+                try:
+                    user_message = create_user_message(text=prompt, image_paths=[image_path])
+                    send_user_message(conn, conversation_id, user_message, prompt)
+                except Exception as exc:
+                    print(f"Error: {exc}")
+                continue
+            if command == "/file":
+                if not args:
+                    print("Usage: /file <path> [prompt]")
+                    continue
+                file_path = args[0]
+                ext = os.path.splitext(file_path)[1].lower()
+                if ext not in TEXT_FILE_EXTENSIONS:
+                    print("Only text-like files are supported via /file (.txt, .md, .csv, .json, .py, .log).")
+                    continue
+                prompt = " ".join(args[1:]).strip() or "Please read and summarize this file."
+                try:
+                    user_message = create_user_message(text=prompt, text_file_paths=[file_path])
+                    send_user_message(conn, conversation_id, user_message, prompt)
+                except Exception as exc:
+                    print(f"Error: {exc}")
+                continue
 
             print("Unknown command. Type /help for help.")
             continue
 
-        add_message(conn, conversation_id, Message("user", user_input))
-        system_prompt = build_system_prompt(conn, user_input)
-        history = get_recent_messages(conn, conversation_id)
-        messages = [Message("system", system_prompt), *history]
-
+        user_message = create_user_message(text=user_input)
         try:
-            response_text = call_openai(messages)
+            send_user_message(conn, conversation_id, user_message, user_input)
         except RuntimeError as exc:
             print(f"Error: {exc}")
             continue
-
-        add_message(conn, conversation_id, Message("assistant", response_text))
-        print(f"\nAssistant: {response_text}")
 
     conn.close()
     return 0

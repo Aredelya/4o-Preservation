@@ -3,6 +3,8 @@ import math
 import os
 import sqlite3
 import uuid
+import base64
+import mimetypes
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable, List, Optional, Tuple
@@ -59,7 +61,7 @@ Memories:
 @dataclass
 class Message:
     role: str
-    content: str
+    content: object
 
 
 def now_iso() -> str:
@@ -206,11 +208,75 @@ def clear_memories(conn: sqlite3.Connection) -> None:
 
 
 def add_message(conn: sqlite3.Connection, conversation_id: str, message: Message) -> None:
+    content = message.content if isinstance(message.content, str) else summarize_content(message.content)
     conn.execute(
         "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-        (conversation_id, message.role, message.content, now_iso()),
+        (conversation_id, message.role, content, now_iso()),
     )
     conn.commit()
+
+
+def summarize_content(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "input_text":
+                parts.append(str(block.get("text", "")))
+            elif block_type == "input_image":
+                parts.append("[image]")
+        return "\n".join(part for part in parts if part).strip() or "[attachment]"
+    return str(content)
+
+
+def encode_file_as_data_url(path: str) -> str:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"File not found: {path}")
+    mime_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    with open(path, "rb") as file_obj:
+        encoded = base64.b64encode(file_obj.read()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def read_text_file(path: str) -> str:
+    with open(path, "r", encoding="utf-8") as file_obj:
+        return file_obj.read()
+
+
+def build_user_content(
+    text: Optional[str] = None,
+    image_data_urls: Optional[List[str]] = None,
+    file_texts: Optional[List[Tuple[str, str]]] = None,
+) -> List[dict]:
+    blocks: List[dict] = []
+    if text:
+        blocks.append({"type": "input_text", "text": text})
+    for image_data_url in image_data_urls or []:
+        blocks.append({"type": "input_image", "image_url": image_data_url})
+    for filename, file_text in file_texts or []:
+        blocks.append(
+            {
+                "type": "input_text",
+                "text": f"File ({filename}):\n{file_text}",
+            }
+        )
+    return blocks
+
+
+def create_user_message(
+    text: Optional[str] = None,
+    image_paths: Optional[List[str]] = None,
+    text_file_paths: Optional[List[str]] = None,
+) -> Message:
+    image_data_urls = [encode_file_as_data_url(path) for path in (image_paths or [])]
+    file_texts = [
+        (os.path.basename(path), read_text_file(path)) for path in (text_file_paths or [])
+    ]
+    return Message("user", build_user_content(text, image_data_urls, file_texts))
 
 
 def get_recent_messages(conn: sqlite3.Connection, conversation_id: str) -> List[Message]:
@@ -302,9 +368,7 @@ def call_openai(messages: Iterable[Message]) -> str:
 
     payload = {
         "model": MODEL,
-        "input": [
-            {"role": message.role, "content": message.content} for message in messages
-        ],
+        "input": [{"role": message.role, "content": message.content} for message in messages],
         "max_output_tokens": MAX_OUTPUT_TOKENS,
     }
 

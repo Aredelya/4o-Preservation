@@ -90,6 +90,8 @@ same database on the VPS.
 - `/memory list` — list saved memories
 - `/memory delete <id>` — delete a memory
 - `/memory clear` — remove all memories
+- `/image <path> [prompt]` — send an image from CLI
+- `/file <path> [prompt]` — send a text-like file from CLI
 - `/help` — show help
 - `/exit` — quit
 
@@ -100,6 +102,21 @@ same database on the VPS.
 - Use `/conversations` to list past chats and `/open <id>` to continue them.
 - The CLI uses simple ANSI colors when run in a TTY.
 - The web app and CLI share the same database for syncing.
+
+
+## Sending images and files
+
+Yes—this project supports file inputs:
+
+- **CLI**
+  - `/image ./photo.jpg What is in this image?`
+  - `/file ./notes.md Summarize this`
+  - `/file` currently supports text-like files (`.txt`, `.md`, `.csv`, `.json`, `.py`, `.log`).
+
+- **Web UI**
+  - Use the file picker next to the message box to attach images or text files before sending.
+
+Images are sent as multimodal `input_image` blocks and text files are included as `input_text` blocks.
 
 ## FAQ: Are embeddings useful for chatbot memory?
 

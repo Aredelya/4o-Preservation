@@ -10,6 +10,7 @@ from core import (
     add_memory,
     add_message,
     build_system_prompt,
+    build_user_content,
     call_openai,
     clear_memories,
     connect_db,
@@ -197,6 +198,7 @@ INDEX_HTML = """<!doctype html>
         <div class="messages" id="messageList"></div>
         <div class="composer">
           <textarea id="messageInput" placeholder="Type a message..."></textarea>
+          <input type="file" id="fileInput" multiple accept="image/*,.txt,.md,.csv,.json,.py,.log" />
           <button class="primary" id="sendMessage">Send</button>
         </div>
       </section>
@@ -221,6 +223,7 @@ INDEX_HTML = """<!doctype html>
       const messageList = document.getElementById("messageList");
       const conversationTitle = document.getElementById("conversationTitle");
       const messageInput = document.getElementById("messageInput");
+      const fileInput = document.getElementById("fileInput");
       const newConversationBtn = document.getElementById("newConversation");
       const sendMessageBtn = document.getElementById("sendMessage");
       const memoryInput = document.getElementById("memoryInput");
@@ -323,13 +326,33 @@ INDEX_HTML = """<!doctype html>
 
       const sendMessage = async () => {
         const content = messageInput.value.trim();
-        if (!content || !state.activeConversation) return;
+        const files = Array.from(fileInput.files || []);
+        if (!state.activeConversation) return;
+        if (!content && files.length === 0) return;
+
+        const attachments = [];
+        for (const file of files) {
+          if (file.type.startsWith("image/")) {
+            const dataUrl = await new Promise((resolve) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result);
+              reader.readAsDataURL(file);
+            });
+            attachments.push({ kind: "image", name: file.name, data_url: dataUrl });
+          } else {
+            const text = await file.text();
+            attachments.push({ kind: "text", name: file.name, text });
+          }
+        }
+
         messageInput.value = "";
+        fileInput.value = "";
         await api("/api/send", {
           method: "POST",
           body: JSON.stringify({
             conversation_id: state.activeConversation,
             content,
+            attachments,
           }),
         });
         await loadMessages(state.activeConversation);
@@ -456,17 +479,24 @@ class ChatHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/send":
             payload = self._read_json()
             conversation_id = payload.get("conversation_id")
-            content = payload.get("content")
-            if not conversation_id or not content:
-                self._send_text("Missing conversation_id or content", HTTPStatus.BAD_REQUEST)
+            content = (payload.get("content") or "").strip()
+            attachments = payload.get("attachments") or []
+            if not conversation_id or (not content and not attachments):
+                self._send_text("Missing conversation_id and message payload", HTTPStatus.BAD_REQUEST)
                 return
+
+            image_data_urls = [a.get("data_url") for a in attachments if a.get("kind") == "image" and a.get("data_url")]
+            file_texts = [(a.get("name") or "file", a.get("text") or "") for a in attachments if a.get("kind") == "text"]
+            user_content = build_user_content(content or None, image_data_urls, file_texts)
+            user_message = Message("user", user_content)
+
             with connect_db() as conn:
                 init_db(conn)
-                add_message(conn, conversation_id, Message("user", content))
-                system_prompt = build_system_prompt(conn, content)
                 history = get_recent_messages(conn, conversation_id)
-                messages = [Message("system", system_prompt), *history]
+                system_prompt = build_system_prompt(conn, content or "Attachment upload")
+                messages = [Message("system", system_prompt), *history, user_message]
                 response_text = call_openai(messages)
+                add_message(conn, conversation_id, user_message)
                 add_message(conn, conversation_id, Message("assistant", response_text))
             self._send_json({"status": "ok"})
             return
