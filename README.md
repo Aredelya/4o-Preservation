@@ -90,6 +90,7 @@ same database on the VPS.
 - `/memory list` — list saved memories
 - `/memory delete <id>` — delete a memory
 - `/memory clear` — remove all memories
+- `/history [n]` — show previous messages from the current conversation
 - `/image <path> [prompt]` — send an image from CLI
 - `/file <path> [prompt]` — send a text-like file from CLI
 - `/help` — show help

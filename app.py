@@ -70,12 +70,28 @@ Commands:
   /memory list              List stored memories.
   /memory delete <id>       Delete a memory by id.
   /memory clear             Delete all memories.
+  /history [n]              Show previous messages from current conversation.
   /image <path> [prompt]    Send an image.
   /file <path> [prompt]     Send a text file plus optional prompt.
   /help                     Show this help message.
   /exit                     Exit the app.
 """
     )
+
+
+def print_recent_history(
+    conn: sqlite3.Connection, conversation_id: str, limit: int = 10
+) -> None:
+    messages = get_recent_messages(conn, conversation_id)
+    if not messages:
+        print("No messages in this conversation yet.")
+        return
+
+    shown = messages[-max(1, limit) :]
+    print(style("\nRecent messages:", ANSI_BOLD, ANSI_GREEN))
+    for message in shown:
+        role_label = "You" if message.role == "user" else "Assistant"
+        print(f"{role_label}: {message.content}")
 
 
 def handle_memory_command(conn: sqlite3.Connection, args: List[str]) -> None:
@@ -183,6 +199,7 @@ def main() -> int:
                     conversation_id = target_id
                     current_title = get_conversation_title(conn, conversation_id)
                     print_banner(conversation_id, current_title)
+                    print_recent_history(conn, conversation_id, limit=10)
                 else:
                     print("Conversation not found.")
                 continue
@@ -199,6 +216,16 @@ def main() -> int:
                 continue
             if command == "/memory":
                 handle_memory_command(conn, args)
+                continue
+            if command == "/history":
+                limit = 10
+                if args:
+                    try:
+                        limit = int(args[0])
+                    except ValueError:
+                        print("Usage: /history [number]")
+                        continue
+                print_recent_history(conn, conversation_id, limit=limit)
                 continue
             if command == "/image":
                 if not args:
