@@ -25,7 +25,7 @@ OPENAI_API_KEY=your-key-here
 
 Optional environment variables:
 
-- `OPENAI_MODEL` (default: `gpt-4o`)
+- `OPENAI_MODEL` (default: `gpt-4o-2024-11-20`)
 - `OPENAI_API_URL` (default: `https://api.openai.com/v1/responses`)
 - `CHATBOT_DB` (default: `chatbot.db`)
 - `CHATBOT_MAX_HISTORY` (default: `50`)
