@@ -239,11 +239,11 @@ INDEX_HTML = """<!doctype html>
           flex: 1 1 100%;
         }
         .panel-memories #clearMemories {
-          position: sticky;
-          bottom: 0;
-          z-index: 1;
-          background: var(--panel);
-          border: 1px solid var(--border);
+          margin-top: 6px;
+          background: transparent;
+          border: 1px solid #8f4b4b;
+          color: #ffb3b3;
+          opacity: 0.9;
         }
         h2 {
           font-size: 13px;
@@ -530,6 +530,9 @@ INDEX_HTML = """<!doctype html>
       };
 
       const clearMemories = async () => {
+        if (!confirm("Clear all memories? This cannot be undone.")) {
+          return;
+        }
         await api("/api/memories", { method: "DELETE" });
         await loadMemories();
       };
