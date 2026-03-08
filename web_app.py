@@ -375,6 +375,7 @@ INDEX_HTML = """<!doctype html>
         memories: [],
         searchQuery: "",
       };
+      let conversationSearchTimer = null;
 
       const conversationList = document.getElementById("conversationList");
       const messageList = document.getElementById("messageList");
@@ -445,7 +446,7 @@ ${preview}` : title;
         requestAnimationFrame(scrollMessagesToBottom);
       };
 
-      const renderMessages = (messages = []) => {
+      const renderMessages = (messages = [], autoSnap = true) => {
         messageList.innerHTML = "";
         messages.forEach((message) => {
           const bubble = document.createElement("div");
@@ -453,7 +454,9 @@ ${preview}` : title;
           bubble.textContent = message.content;
           messageList.appendChild(bubble);
         });
-        scheduleMessageBottomSnap();
+        if (autoSnap) {
+          scheduleMessageBottomSnap();
+        }
       };
 
       const renderMemories = () => {
@@ -479,8 +482,9 @@ ${preview}` : title;
         });
       };
 
-      const loadConversations = async () => {
+      const loadConversations = async ({ refreshMessages = true } = {}) => {
         const query = state.searchQuery.trim();
+        const previousActiveConversation = state.activeConversation;
         const searchSuffix = query ? `?q=${encodeURIComponent(query)}` : "";
         const data = await api(`/api/conversations${searchSuffix}`);
         state.conversations = data.conversations;
@@ -491,11 +495,19 @@ ${preview}` : title;
           state.activeConversation = state.conversations.length ? state.conversations[0].id : null;
         }
         renderConversations();
+
+        if (!refreshMessages) {
+          return;
+        }
+
+        const activeChanged = previousActiveConversation !== state.activeConversation;
         if (state.activeConversation) {
-          await loadMessages(state.activeConversation);
+          if (activeChanged || messageList.childElementCount === 0) {
+            await loadMessages(state.activeConversation);
+          }
         } else {
           conversationTitle.textContent = query ? "No matching conversation" : "Chat";
-          renderMessages([]);
+          renderMessages([], false);
         }
       };
 
@@ -599,14 +611,23 @@ ${preview}` : title;
           sendMessage();
         }
       });
-      conversationSearchInput.addEventListener("input", async () => {
+      conversationSearchInput.addEventListener("input", () => {
         state.searchQuery = conversationSearchInput.value;
-        await loadConversations();
+        if (conversationSearchTimer) {
+          clearTimeout(conversationSearchTimer);
+        }
+        conversationSearchTimer = setTimeout(async () => {
+          await loadConversations({ refreshMessages: false });
+        }, 180);
       });
       clearConversationSearchBtn.onclick = async () => {
+        if (conversationSearchTimer) {
+          clearTimeout(conversationSearchTimer);
+          conversationSearchTimer = null;
+        }
         conversationSearchInput.value = "";
         state.searchQuery = "";
-        await loadConversations();
+        await loadConversations({ refreshMessages: false });
       };
 
       const initializeApp = async () => {
