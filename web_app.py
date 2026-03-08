@@ -65,7 +65,7 @@ INDEX_HTML = """<!doctype html>
         grid-template-columns: 280px 1fr 260px;
         gap: 16px;
         padding: 16px;
-        height: calc(100vh - 72px);
+        height: calc(100dvh - 72px);
         box-sizing: border-box;
         overflow: hidden;
       }
@@ -209,17 +209,19 @@ INDEX_HTML = """<!doctype html>
         }
         main {
           grid-template-columns: 1fr;
-          grid-template-rows: auto minmax(0, 1fr) auto;
-          height: calc(100vh - 64px);
+          grid-template-rows: minmax(140px, 22dvh) minmax(0, 1fr) minmax(150px, 24dvh);
+          min-height: calc(100dvh - 64px);
+          height: auto;
           gap: 10px;
           padding: 10px;
+          overflow-y: auto;
         }
         .panel-conversations,
         .panel-memories {
-          max-height: 140px;
+          min-height: 0;
         }
         .panel-chat {
-          min-height: 0;
+          min-height: 46dvh;
         }
         h2 {
           font-size: 13px;
@@ -229,11 +231,12 @@ INDEX_HTML = """<!doctype html>
           font-size: 15px;
         }
         .messages {
-          gap: 10px;
+          gap: 12px;
         }
         .bubble {
           font-size: 16px;
-          line-height: 1.55;
+          line-height: 1.6;
+          padding: 12px 13px;
         }
         .composer {
           position: sticky;
@@ -252,6 +255,26 @@ INDEX_HTML = """<!doctype html>
         button.primary {
           font-size: 15px;
           min-height: 42px;
+        }
+      }
+
+      @media (max-width: 900px) and (orientation: landscape) {
+        main {
+          grid-template-columns: minmax(180px, 0.9fr) minmax(0, 2fr) minmax(180px, 1fr);
+          grid-template-rows: minmax(0, 1fr);
+          min-height: calc(100dvh - 64px);
+          height: calc(100dvh - 64px);
+          overflow: hidden;
+        }
+        .panel-chat {
+          min-height: 0;
+        }
+        .composer {
+          flex-direction: row;
+          align-items: flex-end;
+        }
+        textarea {
+          min-height: 74px;
         }
       }
     </style>
