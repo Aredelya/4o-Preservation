@@ -409,6 +409,15 @@ INDEX_HTML = """<!doctype html>
         });
       };
 
+      const scrollMessagesToBottom = () => {
+        const scrollNow = () => {
+          messageList.scrollTop = messageList.scrollHeight;
+        };
+        scrollNow();
+        requestAnimationFrame(scrollNow);
+        setTimeout(scrollNow, 80);
+      };
+
       const renderMessages = (messages = []) => {
         messageList.innerHTML = "";
         messages.forEach((message) => {
@@ -417,7 +426,7 @@ INDEX_HTML = """<!doctype html>
           bubble.textContent = message.content;
           messageList.appendChild(bubble);
         });
-        messageList.scrollTop = messageList.scrollHeight;
+        scrollMessagesToBottom();
       };
 
       const renderMemories = () => {
@@ -558,6 +567,7 @@ INDEX_HTML = """<!doctype html>
 
       loadConversations();
       loadMemories();
+      window.addEventListener("load", scrollMessagesToBottom);
     </script>
   </body>
 </html>
