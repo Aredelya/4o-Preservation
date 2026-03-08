@@ -194,6 +194,7 @@ INDEX_HTML = """<!doctype html>
       }
       input[type="text"] {
         flex: 1;
+        min-width: 0;
         background: transparent;
         border: 1px solid var(--border);
         border-radius: 8px;
@@ -223,9 +224,26 @@ INDEX_HTML = """<!doctype html>
         .panel-chat {
           min-height: 46dvh;
         }
+        .panel-memories {
+          overflow-y: auto;
+          padding-bottom: 10px;
+        }
         .panel-memories .list {
           flex: 1;
           min-height: 120px;
+        }
+        .panel-memories .row {
+          flex-wrap: wrap;
+        }
+        .panel-memories #saveMemory {
+          flex: 1 1 100%;
+        }
+        .panel-memories #clearMemories {
+          position: sticky;
+          bottom: 0;
+          z-index: 1;
+          background: var(--panel);
+          border: 1px solid var(--border);
         }
         h2 {
           font-size: 13px;
@@ -293,6 +311,14 @@ INDEX_HTML = """<!doctype html>
           grid-area: file;
           width: 100%;
           min-width: 0;
+        }
+        .panel-memories .row {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .panel-memories #saveMemory,
+        .panel-memories #clearMemories {
+          width: 100%;
         }
       }
     </style>
