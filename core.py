@@ -12,7 +12,7 @@ from urllib import error, request
 
 DB_PATH = os.environ.get("CHATBOT_DB", "chatbot.db")
 API_URL = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/responses")
-MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
+MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-2024-11-20")
 MAX_HISTORY = int(os.environ.get("CHATBOT_MAX_HISTORY", "50"))
 MAX_OUTPUT_TOKENS = int(os.environ.get("CHATBOT_MAX_OUTPUT_TOKENS", "800"))
 EMBEDDING_MODEL = os.environ.get("CHATBOT_EMBEDDING_MODEL", "text-embedding-3-small")
