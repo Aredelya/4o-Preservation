@@ -434,10 +434,46 @@ def call_openai(messages: Iterable[Message], use_web_search: bool = False) -> st
         detail = http_error.read().decode("utf-8")
         raise RuntimeError(f"OpenAI API error ({http_error.code}): {detail}") from http_error
 
-    try:
-        return response_data["output"][0]["content"][0]["text"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError(f"Unexpected API response format: {response_data}") from exc
+    text = extract_response_text(response_data)
+    if text:
+        return text
+
+    raise RuntimeError(f"Unexpected API response format: {response_data}")
+
+
+def extract_response_text(response_data: dict) -> str:
+    output_text = response_data.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    texts: List[str] = []
+
+    for item in response_data.get("output", []):
+        if not isinstance(item, dict):
+            continue
+
+        if item.get("type") != "message":
+            continue
+        if item.get("role") != "assistant":
+            continue
+
+        for block in item.get("content", []):
+            if not isinstance(block, dict):
+                continue
+
+            block_type = block.get("type")
+
+            if block_type in {"output_text", "text"}:
+                text_value = block.get("text")
+
+                if isinstance(text_value, str) and text_value.strip():
+                    texts.append(text_value.strip())
+                elif isinstance(text_value, dict):
+                    nested = text_value.get("value")
+                    if isinstance(nested, str) and nested.strip():
+                        texts.append(nested.strip())
+
+    return "\n\n".join(texts).strip()
 
 
 def load_env_file(path: str) -> None:
