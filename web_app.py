@@ -134,7 +134,8 @@ INDEX_HTML = """<!doctype html>
       .bubble {
         padding: 10px 12px;
         border-radius: 10px;
-        line-height: 1.4;
+        line-height: 1.5;
+        font-size: 15px;
         white-space: pre-wrap;
       }
       .bubble.user {
@@ -200,9 +201,57 @@ INDEX_HTML = """<!doctype html>
         color: inherit;
       }
       @media (max-width: 900px) {
+        body {
+          font-size: 16px;
+        }
+        header {
+          padding: 12px 14px;
+        }
         main {
           grid-template-columns: 1fr;
-          height: calc(100vh - 72px);
+          grid-template-rows: auto minmax(0, 1fr) auto;
+          height: calc(100vh - 64px);
+          gap: 10px;
+          padding: 10px;
+        }
+        .panel-conversations,
+        .panel-memories {
+          max-height: 140px;
+        }
+        .panel-chat {
+          min-height: 0;
+        }
+        h2 {
+          font-size: 13px;
+        }
+        .list button {
+          padding: 10px;
+          font-size: 15px;
+        }
+        .messages {
+          gap: 10px;
+        }
+        .bubble {
+          font-size: 16px;
+          line-height: 1.55;
+        }
+        .composer {
+          position: sticky;
+          bottom: 0;
+          padding-top: 8px;
+          flex-direction: column;
+        }
+        textarea {
+          min-height: 108px;
+          font-size: 16px;
+        }
+        #fileInput {
+          font-size: 15px;
+        }
+        button,
+        button.primary {
+          font-size: 15px;
+          min-height: 42px;
         }
       }
     </style>
@@ -216,11 +265,11 @@ INDEX_HTML = """<!doctype html>
       <button class="primary" id="newConversation">New chat</button>
     </header>
     <main>
-      <section>
+      <section class="panel-conversations">
         <h2>Conversations</h2>
         <div class="list" id="conversationList"></div>
       </section>
-      <section>
+      <section class="panel-chat">
         <h2 id="conversationTitle">Chat</h2>
         <div class="messages" id="messageList"></div>
         <div class="composer">
@@ -229,7 +278,7 @@ INDEX_HTML = """<!doctype html>
           <button class="primary" id="sendMessage">Send</button>
         </div>
       </section>
-      <section>
+      <section class="panel-memories">
         <h2>Memories</h2>
         <div class="row">
           <input type="text" id="memoryInput" placeholder="Add a memory..." />
