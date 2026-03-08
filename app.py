@@ -16,6 +16,7 @@ from core import (
     conversation_exists,
     create_conversation,
     create_user_message,
+    delete_conversation,
     delete_memory,
     get_conversation_title,
     get_recent_messages,
@@ -65,6 +66,7 @@ Commands:
   /new                      Start a new conversation.
   /conversations            List saved conversations.
   /open <id>                Resume a conversation by id.
+  /delete <id>              Delete a conversation by id.
   /title <text>             Rename the current conversation.
   /memory add <text>        Add a long-term memory.
   /memory list              List stored memories.
@@ -73,6 +75,7 @@ Commands:
   /history [n]              Show previous messages from current conversation.
   /image <path> [prompt]    Send an image.
   /file <path> [prompt]     Send a text file plus optional prompt.
+  /web <query>               Run a web search-backed query.
   /help                     Show this help message.
   /exit                     Exit the app.
 """
@@ -134,12 +137,18 @@ def handle_memory_command(conn: sqlite3.Connection, args: List[str]) -> None:
         print("Unknown /memory action. Use add, list, delete, or clear.")
 
 
-def send_user_message(conn: sqlite3.Connection, conversation_id: str, user_message: Message, query: str) -> None:
+def send_user_message(
+    conn: sqlite3.Connection,
+    conversation_id: str,
+    user_message: Message,
+    query: str,
+    use_web_search: bool = False,
+) -> None:
     history = get_recent_messages(conn, conversation_id)
     system_prompt = build_system_prompt(conn, query)
     messages = [Message("system", system_prompt), *history, user_message]
 
-    response_text = call_openai(messages)
+    response_text = call_openai(messages, use_web_search=use_web_search)
     add_message(conn, conversation_id, user_message)
     add_message(conn, conversation_id, Message("assistant", response_text))
     print(f"\nAssistant: {response_text}")
@@ -203,6 +212,22 @@ def main() -> int:
                 else:
                     print("Conversation not found.")
                 continue
+            if command == "/delete":
+                if not args:
+                    print("Usage: /delete <id>")
+                    continue
+                target_id = args[0]
+                if not delete_conversation(conn, target_id):
+                    print("Conversation not found.")
+                    continue
+                if conversation_id == target_id:
+                    conversation_id = create_conversation(conn)
+                    current_title = get_conversation_title(conn, conversation_id)
+                    print("Deleted current conversation. Started a new one.")
+                    print_banner(conversation_id, current_title)
+                else:
+                    print("Conversation deleted.")
+                continue
             if command == "/title":
                 title = " ".join(args).strip()
                 if not title:
@@ -226,6 +251,17 @@ def main() -> int:
                         print("Usage: /history [number]")
                         continue
                 print_recent_history(conn, conversation_id, limit=limit)
+                continue
+            if command == "/web":
+                query = " ".join(args).strip()
+                if not query:
+                    print("Usage: /web <query>")
+                    continue
+                try:
+                    user_message = create_user_message(text=f"Use web search and answer with sources: {query}")
+                    send_user_message(conn, conversation_id, user_message, query, use_web_search=True)
+                except Exception as exc:
+                    print(f"Error: {exc}")
                 continue
             if command == "/image":
                 if not args:

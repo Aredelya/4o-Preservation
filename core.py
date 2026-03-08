@@ -19,6 +19,7 @@ EMBEDDING_MODEL = os.environ.get("CHATBOT_EMBEDDING_MODEL", "text-embedding-3-sm
 EMBEDDINGS_ENABLED = os.environ.get("CHATBOT_USE_EMBEDDINGS", "1").lower() not in {"0", "false", "no"}
 EMBEDDINGS_TOP_K = int(os.environ.get("CHATBOT_EMBEDDINGS_TOP_K", "6"))
 ENV_PATH = os.environ.get("CHATBOT_ENV_FILE", ".env")
+WEB_SEARCH_ENABLED = os.environ.get("CHATBOT_ENABLE_WEB_SEARCH", "1").lower() not in {"0", "false", "no"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
@@ -122,6 +123,13 @@ def get_conversation_title(
         (conversation_id,),
     ).fetchone()
     return row["title"] if row else None
+
+
+def delete_conversation(conn: sqlite3.Connection, conversation_id: str) -> bool:
+    conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
+    cur = conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def list_memories(conn: sqlite3.Connection) -> List[Tuple[int, str, str]]:
@@ -361,7 +369,7 @@ def build_system_prompt(conn: sqlite3.Connection, query: Optional[str] = None) -
     return SYSTEM_PROMPT_TEMPLATE.format(memories=memories_text)
 
 
-def call_openai(messages: Iterable[Message]) -> str:
+def call_openai(messages: Iterable[Message], use_web_search: bool = False) -> str:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
@@ -371,6 +379,9 @@ def call_openai(messages: Iterable[Message]) -> str:
         "input": [{"role": message.role, "content": message.content} for message in messages],
         "max_output_tokens": MAX_OUTPUT_TOKENS,
     }
+
+    if WEB_SEARCH_ENABLED and use_web_search:
+        payload["tools"] = [{"type": "web_search_preview"}]
 
     data = json.dumps(payload).encode("utf-8")
     req = request.Request(

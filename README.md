@@ -34,6 +34,7 @@ Optional environment variables:
 - `CHATBOT_USE_EMBEDDINGS` (default: `1`)
 - `CHATBOT_EMBEDDING_MODEL` (default: `text-embedding-3-small`)
 - `CHATBOT_EMBEDDINGS_TOP_K` (default: `6`)
+- `CHATBOT_ENABLE_WEB_SEARCH` (default: `1`)
 
 ## Run
 
@@ -52,6 +53,7 @@ python3 web_app.py
 Then open `http://<your-pc-ip>:8000` on your iPhone or iPad (same Wi-Fi) to access the synced chats
 and memories. The web UI reads and writes to the same `chatbot.db`, so both the CLI and web app stay
 in sync.
+You can delete conversations directly from the conversation list using the `✕` button.
 
 Optional web environment variables:
 
@@ -85,6 +87,7 @@ same database on the VPS.
 - `/new` — start a new conversation
 - `/conversations` — list saved conversations
 - `/open <id>` — resume a conversation by id
+- `/delete <id>` — delete a conversation by id
 - `/title <text>` — rename the current conversation
 - `/memory add <text>` — save a long-term memory
 - `/memory list` — list saved memories
@@ -93,6 +96,7 @@ same database on the VPS.
 - `/history [n]` — show previous messages from the current conversation
 - `/image <path> [prompt]` — send an image from CLI
 - `/file <path> [prompt]` — send a text-like file from CLI
+- `/web <query>` — run a web search-backed query (CLI)
 - `/help` — show help
 - `/exit` — quit
 
@@ -104,6 +108,15 @@ same database on the VPS.
 - The CLI uses simple ANSI colors when run in a TTY.
 - The web app and CLI share the same database for syncing.
 
+
+
+## Web search support
+
+Yes — web search is now supported.
+
+- **CLI**: use `/web <query>` to run a search-backed response (example: `/web latest OpenAI API updates`).
+- **Web UI**: start your message with `/web ` (example: `/web latest AI news`) to enable search for that turn.
+- You can disable this feature globally with `CHATBOT_ENABLE_WEB_SEARCH=0`.
 
 ## Sending images and files
 

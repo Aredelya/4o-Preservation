@@ -15,6 +15,7 @@ from core import (
     clear_memories,
     connect_db,
     create_conversation,
+    delete_conversation,
     delete_memory,
     get_all_messages,
     get_conversation_title,
@@ -50,6 +51,7 @@ INDEX_HTML = """<!doctype html>
         font-family: "Inter", system-ui, -apple-system, sans-serif;
         background: var(--bg);
         color: var(--text);
+        min-height: 100vh;
       }
       header {
         padding: 16px 24px;
@@ -65,6 +67,7 @@ INDEX_HTML = """<!doctype html>
         padding: 16px;
         height: calc(100vh - 72px);
         box-sizing: border-box;
+        overflow: hidden;
       }
       section {
         background: var(--panel);
@@ -74,6 +77,8 @@ INDEX_HTML = """<!doctype html>
         display: flex;
         flex-direction: column;
         gap: 12px;
+        min-height: 0;
+        overflow: hidden;
       }
       h2 {
         font-size: 14px;
@@ -97,16 +102,34 @@ INDEX_HTML = """<!doctype html>
         border-radius: 8px;
         cursor: pointer;
       }
+      .list-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .list-item button {
+        flex: 1;
+      }
+      .danger {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: transparent;
+        color: #ff8f8f;
+        cursor: pointer;
+        padding: 6px 8px;
+      }
       .list button.active {
         border-color: var(--accent);
         background: rgba(91, 140, 255, 0.12);
       }
       .messages {
         flex: 1;
+        min-height: 0;
         overflow-y: auto;
         display: flex;
         flex-direction: column;
         gap: 12px;
+        padding-right: 4px;
       }
       .bubble {
         padding: 10px 12px;
@@ -125,6 +148,10 @@ INDEX_HTML = """<!doctype html>
       .composer {
         display: flex;
         gap: 8px;
+        position: sticky;
+        bottom: 0;
+        background: var(--panel);
+        padding-top: 8px;
       }
       textarea {
         flex: 1;
@@ -175,7 +202,7 @@ INDEX_HTML = """<!doctype html>
       @media (max-width: 900px) {
         main {
           grid-template-columns: 1fr;
-          height: auto;
+          height: calc(100vh - 72px);
         }
       }
     </style>
@@ -246,11 +273,23 @@ INDEX_HTML = """<!doctype html>
       const renderConversations = () => {
         conversationList.innerHTML = "";
         state.conversations.forEach((convo) => {
+          const row = document.createElement("div");
+          row.className = "list-item";
           const button = document.createElement("button");
           button.textContent = `${convo.title || "Untitled"} · ${convo.id.slice(0, 8)}`;
           button.className = convo.id === state.activeConversation ? "active" : "";
           button.onclick = () => selectConversation(convo.id);
-          conversationList.appendChild(button);
+          const remove = document.createElement("button");
+          remove.className = "danger";
+          remove.textContent = "✕";
+          remove.title = "Delete conversation";
+          remove.onclick = async () => {
+            if (!confirm("Delete this conversation?")) return;
+            await deleteConversation(convo.id);
+          };
+          row.appendChild(button);
+          row.appendChild(remove);
+          conversationList.appendChild(row);
         });
       };
 
@@ -379,6 +418,14 @@ INDEX_HTML = """<!doctype html>
         await loadMemories();
       };
 
+      const deleteConversation = async (id) => {
+        await api(`/api/conversations/${id}`, { method: "DELETE" });
+        if (state.activeConversation === id) {
+          state.activeConversation = null;
+        }
+        await loadConversations();
+      };
+
       newConversationBtn.onclick = createConversation;
       sendMessageBtn.onclick = sendMessage;
       saveMemoryBtn.onclick = addMemory;
@@ -481,6 +528,10 @@ class ChatHandler(BaseHTTPRequestHandler):
             conversation_id = payload.get("conversation_id")
             content = (payload.get("content") or "").strip()
             attachments = payload.get("attachments") or []
+            use_web_search = False
+            if content.lower().startswith("/web "):
+                use_web_search = True
+                content = content[5:].strip()
             if not conversation_id or (not content and not attachments):
                 self._send_text("Missing conversation_id and message payload", HTTPStatus.BAD_REQUEST)
                 return
@@ -495,7 +546,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 history = get_recent_messages(conn, conversation_id)
                 system_prompt = build_system_prompt(conn, content or "Attachment upload")
                 messages = [Message("system", system_prompt), *history, user_message]
-                response_text = call_openai(messages)
+                response_text = call_openai(messages, use_web_search=use_web_search)
                 add_message(conn, conversation_id, user_message)
                 add_message(conn, conversation_id, Message("assistant", response_text))
             self._send_json({"status": "ok"})
@@ -530,6 +581,14 @@ class ChatHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/conversations/"):
+            conversation_id = parsed.path.split("/")[-1]
+            with connect_db() as conn:
+                init_db(conn)
+                deleted = delete_conversation(conn, conversation_id)
+            self._send_json({"deleted": deleted})
+            return
+
         if parsed.path == "/api/memories":
             with connect_db() as conn:
                 init_db(conn)
