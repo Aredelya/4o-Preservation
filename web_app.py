@@ -411,6 +411,10 @@ INDEX_HTML = """<!doctype html>
 
       const scrollMessagesToBottom = () => {
         messageList.scrollTop = messageList.scrollHeight;
+        const lastBubble = messageList.lastElementChild;
+        if (lastBubble) {
+          lastBubble.scrollIntoView({ block: "end" });
+        }
       };
 
       const scheduleMessageBottomSnap = () => {
@@ -568,8 +572,13 @@ INDEX_HTML = """<!doctype html>
         }
       });
 
-      loadConversations();
-      loadMemories();
+      const initializeApp = async () => {
+        await loadConversations();
+        scheduleMessageBottomSnap();
+        await loadMemories();
+      };
+
+      initializeApp();
       window.addEventListener("load", scheduleMessageBottomSnap);
       window.addEventListener("pageshow", scheduleMessageBottomSnap);
       document.addEventListener("visibilitychange", () => {
