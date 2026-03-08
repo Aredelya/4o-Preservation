@@ -410,12 +410,15 @@ INDEX_HTML = """<!doctype html>
       };
 
       const scrollMessagesToBottom = () => {
-        const scrollNow = () => {
-          messageList.scrollTop = messageList.scrollHeight;
-        };
-        scrollNow();
-        requestAnimationFrame(scrollNow);
-        setTimeout(scrollNow, 80);
+        messageList.scrollTop = messageList.scrollHeight;
+      };
+
+      const scheduleMessageBottomSnap = () => {
+        const delays = [0, 50, 140, 280, 520];
+        delays.forEach((delay) => {
+          setTimeout(scrollMessagesToBottom, delay);
+        });
+        requestAnimationFrame(scrollMessagesToBottom);
       };
 
       const renderMessages = (messages = []) => {
@@ -426,7 +429,7 @@ INDEX_HTML = """<!doctype html>
           bubble.textContent = message.content;
           messageList.appendChild(bubble);
         });
-        scrollMessagesToBottom();
+        scheduleMessageBottomSnap();
       };
 
       const renderMemories = () => {
@@ -567,7 +570,16 @@ INDEX_HTML = """<!doctype html>
 
       loadConversations();
       loadMemories();
-      window.addEventListener("load", scrollMessagesToBottom);
+      window.addEventListener("load", scheduleMessageBottomSnap);
+      window.addEventListener("pageshow", scheduleMessageBottomSnap);
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) {
+          scheduleMessageBottomSnap();
+        }
+      });
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", scheduleMessageBottomSnap);
+      }
     </script>
   </body>
 </html>
