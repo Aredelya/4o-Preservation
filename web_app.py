@@ -209,7 +209,7 @@ INDEX_HTML = """<!doctype html>
         }
         main {
           grid-template-columns: 1fr;
-          grid-template-rows: minmax(140px, 22dvh) minmax(0, 1fr) minmax(150px, 24dvh);
+          grid-template-rows: minmax(120px, 18dvh) minmax(0, 1fr) minmax(220px, 30dvh);
           min-height: calc(100dvh - 64px);
           height: auto;
           gap: 10px;
@@ -222,6 +222,10 @@ INDEX_HTML = """<!doctype html>
         }
         .panel-chat {
           min-height: 46dvh;
+        }
+        .panel-memories .list {
+          flex: 1;
+          min-height: 120px;
         }
         h2 {
           font-size: 13px;
@@ -260,7 +264,7 @@ INDEX_HTML = """<!doctype html>
 
       @media (max-width: 900px) and (orientation: landscape) {
         main {
-          grid-template-columns: minmax(180px, 0.9fr) minmax(0, 2fr) minmax(180px, 1fr);
+          grid-template-columns: minmax(165px, 0.8fr) minmax(0, 1.7fr) minmax(190px, 1fr);
           grid-template-rows: minmax(0, 1fr);
           min-height: calc(100dvh - 64px);
           height: calc(100dvh - 64px);
@@ -270,11 +274,25 @@ INDEX_HTML = """<!doctype html>
           min-height: 0;
         }
         .composer {
-          flex-direction: row;
-          align-items: flex-end;
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          grid-template-areas:
+            "text send"
+            "file file";
+          align-items: stretch;
         }
-        textarea {
-          min-height: 74px;
+        .composer textarea {
+          grid-area: text;
+          min-height: 86px;
+        }
+        .composer #sendMessage {
+          grid-area: send;
+          min-width: 84px;
+        }
+        .composer #fileInput {
+          grid-area: file;
+          width: 100%;
+          min-width: 0;
         }
       }
     </style>
