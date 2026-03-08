@@ -664,9 +664,18 @@ ${preview}` : title;
       };
 
       const initializeApp = async () => {
-        await loadConversations();
-        scheduleMessageBottomSnap();
-        await loadMemories();
+        try {
+          await loadMemories();
+        } catch (error) {
+          console.error("Failed to load memories:", error);
+        }
+
+        try {
+          await loadConversations();
+          scheduleMessageBottomSnap();
+        } catch (error) {
+          console.error("Failed to load conversations:", error);
+        }
       };
 
       initializeApp();
