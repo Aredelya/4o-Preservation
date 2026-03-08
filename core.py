@@ -97,6 +97,39 @@ def list_conversations(conn: sqlite3.Connection) -> List[Tuple[str, Optional[str
     return [(row["id"], row["title"], row["created_at"]) for row in rows]
 
 
+def search_conversations(
+    conn: sqlite3.Connection, query: str, limit: int = 25
+) -> List[Tuple[str, Optional[str], str, Optional[str]]]:
+    term = query.strip().lower()
+    if not term:
+        return []
+
+    like_term = f"%{term}%"
+    rows = conn.execute(
+        """
+        SELECT
+            c.id,
+            c.title,
+            c.created_at,
+            MAX(CASE WHEN LOWER(m.content) LIKE ? THEN m.content ELSE NULL END) AS snippet,
+            MAX(CASE WHEN LOWER(c.title) LIKE ? THEN 1 ELSE 0 END) AS title_match,
+            SUM(CASE WHEN LOWER(m.content) LIKE ? THEN 1 ELSE 0 END) AS message_matches,
+            COALESCE(MAX(m.created_at), c.created_at) AS sort_time
+        FROM conversations c
+        LEFT JOIN messages m ON m.conversation_id = c.id
+        GROUP BY c.id, c.title, c.created_at
+        HAVING title_match > 0 OR message_matches > 0
+        ORDER BY title_match DESC, message_matches DESC, sort_time DESC
+        LIMIT ?
+        """,
+        (like_term, like_term, like_term, limit),
+    ).fetchall()
+    return [
+        (row["id"], row["title"], row["created_at"], row["snippet"])
+        for row in rows
+    ]
+
+
 def conversation_exists(conn: sqlite3.Connection, conversation_id: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM conversations WHERE id = ? LIMIT 1", (conversation_id,)

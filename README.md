@@ -86,6 +86,7 @@ same database on the VPS.
 
 - `/new` — start a new conversation
 - `/conversations` — list saved conversations
+- `/search <text>` — search conversations by title/message text
 - `/open <id>` — resume a conversation by id
 - `/delete <id>` — delete a conversation by id
 - `/title <text>` — rename the current conversation
@@ -111,6 +112,10 @@ same database on the VPS.
 
 
 ## Web search support
+
+- **Conversation search**
+  - **CLI**: `/search <text>` searches conversation titles and message text.
+  - **Web UI**: use the **Search chats...** field above the conversation list.
 
 Yes — web search is now supported.
 

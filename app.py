@@ -24,6 +24,7 @@ from core import (
     list_conversations,
     list_memories,
     load_env_file,
+    search_conversations,
     update_conversation_title,
 )
 
@@ -65,6 +66,7 @@ def print_help() -> None:
 Commands:
   /new                      Start a new conversation.
   /conversations            List saved conversations.
+  /search <text>            Search conversation titles/messages.
   /open <id>                Resume a conversation by id.
   /delete <id>              Delete a conversation by id.
   /title <text>             Rename the current conversation.
@@ -198,6 +200,24 @@ def main() -> int:
                 for convo_id, title, created_at in conversations:
                     title_display = title or "Untitled"
                     print(f"{convo_id} | {title_display} | {created_at}")
+                continue
+            if command == "/search":
+                query = " ".join(args).strip()
+                if not query:
+                    print("Usage: /search <text>")
+                    continue
+                results = search_conversations(conn, query)
+                if not results:
+                    print("No matching conversations found.")
+                    continue
+                for convo_id, title, created_at, snippet in results:
+                    title_display = title or "Untitled"
+                    print(f"{convo_id} | {title_display} | {created_at}")
+                    if snippet:
+                        short = snippet.replace("\n", " ").strip()
+                        if len(short) > 140:
+                            short = short[:137] + "..."
+                        print(f"  ↳ {short}")
                 continue
             if command == "/open":
                 if not args:

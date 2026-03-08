@@ -2,7 +2,7 @@ import json
 import os
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from core import (
     ENV_PATH,
@@ -24,6 +24,7 @@ from core import (
     list_conversations,
     list_memories,
     load_env_file,
+    search_conversations,
     update_conversation_title,
 )
 
@@ -101,6 +102,7 @@ INDEX_HTML = """<!doctype html>
         padding: 8px;
         border-radius: 8px;
         cursor: pointer;
+        white-space: pre-line;
       }
       .list-item {
         display: flex;
@@ -121,6 +123,13 @@ INDEX_HTML = """<!doctype html>
       .list button.active {
         border-color: var(--accent);
         background: rgba(91, 140, 255, 0.12);
+      }
+      .search-row {
+        display: flex;
+        gap: 8px;
+      }
+      .search-row input {
+        flex: 1;
       }
       .messages {
         flex: 1;
@@ -334,6 +343,10 @@ INDEX_HTML = """<!doctype html>
     <main>
       <section class="panel-conversations">
         <h2>Conversations</h2>
+        <div class="search-row">
+          <input type="text" id="conversationSearch" placeholder="Search chats..." />
+          <button id="clearConversationSearch">Clear</button>
+        </div>
         <div class="list" id="conversationList"></div>
       </section>
       <section class="panel-chat">
@@ -360,6 +373,7 @@ INDEX_HTML = """<!doctype html>
         conversations: [],
         activeConversation: null,
         memories: [],
+        searchQuery: "",
       };
 
       const conversationList = document.getElementById("conversationList");
@@ -373,6 +387,8 @@ INDEX_HTML = """<!doctype html>
       const saveMemoryBtn = document.getElementById("saveMemory");
       const memoryList = document.getElementById("memoryList");
       const clearMemoriesBtn = document.getElementById("clearMemories");
+      const conversationSearchInput = document.getElementById("conversationSearch");
+      const clearConversationSearchBtn = document.getElementById("clearConversationSearch");
 
       const api = async (path, options = {}) => {
         const response = await fetch(path, {
@@ -392,7 +408,11 @@ INDEX_HTML = """<!doctype html>
           const row = document.createElement("div");
           row.className = "list-item";
           const button = document.createElement("button");
-          button.textContent = `${convo.title || "Untitled"} · ${convo.id.slice(0, 8)}`;
+          const title = `${convo.title || "Untitled"} · ${convo.id.slice(0, 8)}`;
+          const snippet = (convo.snippet || "").replace(/\s+/g, " ").trim();
+          const preview = snippet.length > 96 ? `${snippet.slice(0, 93)}...` : snippet;
+          button.textContent = preview ? `${title}
+${preview}` : title;
           button.className = convo.id === state.activeConversation ? "active" : "";
           button.onclick = () => selectConversation(convo.id);
           const remove = document.createElement("button");
@@ -460,14 +480,22 @@ INDEX_HTML = """<!doctype html>
       };
 
       const loadConversations = async () => {
-        const data = await api("/api/conversations");
+        const query = state.searchQuery.trim();
+        const searchSuffix = query ? `?q=${encodeURIComponent(query)}` : "";
+        const data = await api(`/api/conversations${searchSuffix}`);
         state.conversations = data.conversations;
         if (!state.activeConversation && data.conversations.length) {
           state.activeConversation = data.conversations[0].id;
         }
+        if (state.activeConversation && !state.conversations.some((convo) => convo.id === state.activeConversation)) {
+          state.activeConversation = state.conversations.length ? state.conversations[0].id : null;
+        }
         renderConversations();
         if (state.activeConversation) {
           await loadMessages(state.activeConversation);
+        } else {
+          conversationTitle.textContent = query ? "No matching conversation" : "Chat";
+          renderMessages([]);
         }
       };
 
@@ -571,6 +599,15 @@ INDEX_HTML = """<!doctype html>
           sendMessage();
         }
       });
+      conversationSearchInput.addEventListener("input", async () => {
+        state.searchQuery = conversationSearchInput.value;
+        await loadConversations();
+      });
+      clearConversationSearchBtn.onclick = async () => {
+        conversationSearchInput.value = "";
+        state.searchQuery = "";
+        await loadConversations();
+      };
 
       const initializeApp = async () => {
         await loadConversations();
@@ -631,12 +668,25 @@ class ChatHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/conversations":
+            params = parse_qs(parsed.query)
+            query = (params.get("q", [""])[0] or "").strip()
             with connect_db() as conn:
                 init_db(conn)
-                conversations = [
-                    {"id": convo_id, "title": title, "created_at": created_at}
-                    for convo_id, title, created_at in list_conversations(conn)
-                ]
+                if query:
+                    conversations = [
+                        {
+                            "id": convo_id,
+                            "title": title,
+                            "created_at": created_at,
+                            "snippet": snippet,
+                        }
+                        for convo_id, title, created_at, snippet in search_conversations(conn, query)
+                    ]
+                else:
+                    conversations = [
+                        {"id": convo_id, "title": title, "created_at": created_at}
+                        for convo_id, title, created_at in list_conversations(conn)
+                    ]
             self._send_json({"conversations": conversations})
             return
 
