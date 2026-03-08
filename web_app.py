@@ -438,12 +438,25 @@ ${preview}` : title;
         }
       };
 
+      const shouldSkipAutoSnap = () => document.activeElement === conversationSearchInput;
+
       const scheduleMessageBottomSnap = () => {
+        if (shouldSkipAutoSnap()) {
+          return;
+        }
         const delays = [0, 50, 140, 280, 520];
         delays.forEach((delay) => {
-          setTimeout(scrollMessagesToBottom, delay);
+          setTimeout(() => {
+            if (!shouldSkipAutoSnap()) {
+              scrollMessagesToBottom();
+            }
+          }, delay);
         });
-        requestAnimationFrame(scrollMessagesToBottom);
+        requestAnimationFrame(() => {
+          if (!shouldSkipAutoSnap()) {
+            scrollMessagesToBottom();
+          }
+        });
       };
 
       const renderMessages = (messages = [], autoSnap = true) => {
@@ -609,6 +622,12 @@ ${preview}` : title;
         if (event.key === "Enter" && !event.shiftKey) {
           event.preventDefault();
           sendMessage();
+        }
+      });
+      conversationSearchInput.addEventListener("focus", () => {
+        if (conversationSearchTimer) {
+          clearTimeout(conversationSearchTimer);
+          conversationSearchTimer = null;
         }
       });
       conversationSearchInput.addEventListener("input", () => {
