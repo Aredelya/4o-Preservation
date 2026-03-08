@@ -438,7 +438,10 @@ ${preview}` : title;
         }
       };
 
-      const shouldSkipAutoSnap = () => document.activeElement === conversationSearchInput;
+      const shouldSkipAutoSnap = () => {
+        const active = document.activeElement;
+        return active === conversationSearchInput || active === messageInput || active === memoryInput;
+      };
 
       const scheduleMessageBottomSnap = () => {
         if (shouldSkipAutoSnap()) {
