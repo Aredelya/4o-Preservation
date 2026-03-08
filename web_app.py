@@ -519,7 +519,7 @@ ${preview}` : title;
         const activeChanged = previousActiveConversation !== state.activeConversation;
         if (state.activeConversation) {
           if (activeChanged || messageList.childElementCount === 0) {
-            await loadMessages(state.activeConversation);
+            await loadMessages(conversationId);
           }
         } else {
           conversationTitle.textContent = query ? "No matching conversation" : "Chat";
@@ -551,11 +551,22 @@ ${preview}` : title;
         await loadConversations();
       };
 
+      const ensureActiveConversation = async () => {
+        if (state.activeConversation) {
+          return state.activeConversation;
+        }
+        const data = await api("/api/conversations", { method: "POST" });
+        state.activeConversation = data.id;
+        await loadConversations({ refreshMessages: false });
+        return data.id;
+      };
+
       const sendMessage = async () => {
         const content = messageInput.value.trim();
         const files = Array.from(fileInput.files || []);
-        if (!state.activeConversation) return;
         if (!content && files.length === 0) return;
+
+        const conversationId = await ensureActiveConversation();
 
         const attachments = [];
         for (const file of files) {
@@ -577,12 +588,12 @@ ${preview}` : title;
         await api("/api/send", {
           method: "POST",
           body: JSON.stringify({
-            conversation_id: state.activeConversation,
+            conversation_id: conversationId,
             content,
             attachments,
           }),
         });
-        await loadMessages(state.activeConversation);
+        await loadMessages(conversationId);
       };
 
       const addMemory = async () => {
