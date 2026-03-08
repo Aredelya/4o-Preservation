@@ -519,7 +519,7 @@ ${preview}` : title;
         const activeChanged = previousActiveConversation !== state.activeConversation;
         if (state.activeConversation) {
           if (activeChanged || messageList.childElementCount === 0) {
-            await loadMessages(conversationId);
+            await loadMessages(state.activeConversation);
           }
         } else {
           conversationTitle.textContent = query ? "No matching conversation" : "Chat";
