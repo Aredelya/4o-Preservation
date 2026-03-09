@@ -210,7 +210,7 @@ INDEX_HTML = """<!doctype html>
         padding: 8px;
         color: inherit;
       }
-      @media (max-width: 900px) {
+      @media (max-width: 1100px) {
         body {
           font-size: 16px;
         }
@@ -289,7 +289,7 @@ INDEX_HTML = """<!doctype html>
         }
       }
 
-      @media (max-width: 900px) and (orientation: landscape) {
+      @media (max-width: 1100px) and (orientation: landscape) {
         main {
           grid-template-columns: minmax(165px, 0.8fr) minmax(0, 1.7fr) minmax(190px, 1fr);
           grid-template-rows: minmax(0, 1fr);
