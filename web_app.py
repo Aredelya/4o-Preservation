@@ -547,8 +547,8 @@ ${preview}` : title;
 
       const createConversation = async () => {
         const data = await api("/api/conversations", { method: "POST" });
-        state.activeConversation = data.id;
-        await loadConversations();
+        await loadConversations({ refreshMessages: false });
+        await selectConversation(data.id);
       };
 
       const ensureActiveConversation = async () => {
