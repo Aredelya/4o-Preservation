@@ -792,15 +792,47 @@ class ChatHandler(BaseHTTPRequestHandler):
             content = (payload.get("content") or "").strip()
             attachments = payload.get("attachments") or []
             use_web_search = False
-            if content.lower().startswith("/web "):
-                use_web_search = True
-                content = content[5:].strip()
+
             if not conversation_id or (not content and not attachments):
                 self._send_text("Missing conversation_id and message payload", HTTPStatus.BAD_REQUEST)
                 return
 
-            image_data_urls = [a.get("data_url") for a in attachments if a.get("kind") == "image" and a.get("data_url")]
-            file_texts = [(a.get("name") or "file", a.get("text") or "") for a in attachments if a.get("kind") == "text"]
+            # Handle /title in the web UI the same way the CLI does.
+            if content.lower().startswith("/title"):
+                parts = content.split(None, 1)
+                new_title = parts[1].strip() if len(parts) > 1 else ""
+                if not new_title:
+                    self._send_text("Missing title text", HTTPStatus.BAD_REQUEST)
+                    return
+
+                with connect_db() as conn:
+                    init_db(conn)
+                    updated = update_conversation_title(conn, conversation_id, new_title)
+
+                self._send_json(
+                    {
+                        "status": "ok",
+                        "command": "title",
+                        "updated": updated,
+                        "title": new_title,
+                    }
+                )
+                return
+
+            if content.lower().startswith("/web "):
+                use_web_search = True
+                content = content[5:].strip()
+
+            image_data_urls = [
+                a.get("data_url")
+                for a in attachments
+                if a.get("kind") == "image" and a.get("data_url")
+            ]
+            file_texts = [
+                (a.get("name") or "file", a.get("text") or "")
+                for a in attachments
+                if a.get("kind") == "text"
+            ]
             user_content = build_user_content(content or None, image_data_urls, file_texts)
             user_message = Message("user", user_content)
 
@@ -812,6 +844,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 response_text = call_openai(messages, use_web_search=use_web_search)
                 add_message(conn, conversation_id, user_message)
                 add_message(conn, conversation_id, Message("assistant", response_text))
+
             self._send_json({"status": "ok"})
             return
 
