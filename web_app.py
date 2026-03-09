@@ -585,7 +585,7 @@ ${preview}` : title;
 
         messageInput.value = "";
         fileInput.value = "";
-        await api("/api/send", {
+        const result = await api("/api/send", {
           method: "POST",
           body: JSON.stringify({
             conversation_id: conversationId,
@@ -593,7 +593,14 @@ ${preview}` : title;
             attachments,
           }),
         });
-        await loadMessages(conversationId);
+
+        await loadConversations({ refreshMessages: false });
+
+        if (result.command === "title") {
+          conversationTitle.textContent = result.title || "Chat";
+        } else {
+          await loadMessages(conversationId);
+        }
       };
 
       const addMemory = async () => {
