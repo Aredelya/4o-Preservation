@@ -966,7 +966,15 @@ class ChatHandler(BaseHTTPRequestHandler):
                 add_message(conn, conversation_id, user_message)
                 add_message(conn, conversation_id, Message("assistant", response_text))
 
-            self._send_json({"status": "ok"})
+            self._send_json(
+                {
+                    "status": "ok",
+                    "assistant_message": {
+                        "role": "assistant",
+                        "content": response_text,
+                    },
+                }
+            )
             return
 
         if parsed.path == "/api/memories":
