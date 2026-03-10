@@ -25,7 +25,8 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
     title TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -77,14 +78,37 @@ def connect_db() -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+
+    columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(conversations)").fetchall()
+    }
+    if "updated_at" not in columns:
+        conn.execute("ALTER TABLE conversations ADD COLUMN updated_at TEXT")
+        conn.execute(
+            """
+            UPDATE conversations
+            SET updated_at = COALESCE(
+                (
+                    SELECT MAX(messages.created_at)
+                    FROM messages
+                    WHERE messages.conversation_id = conversations.id
+                ),
+                created_at
+            )
+            WHERE updated_at IS NULL
+            """
+        )
+
     conn.commit()
 
 
 def create_conversation(conn: sqlite3.Connection, title: Optional[str] = None) -> str:
     conversation_id = str(uuid.uuid4())
+    now = now_iso()
     conn.execute(
-        "INSERT INTO conversations (id, title, created_at) VALUES (?, ?, ?)",
-        (conversation_id, title, now_iso()),
+        "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        (conversation_id, title, now, now),
     )
     conn.commit()
     return conversation_id
@@ -92,7 +116,7 @@ def create_conversation(conn: sqlite3.Connection, title: Optional[str] = None) -
 
 def list_conversations(conn: sqlite3.Connection) -> List[Tuple[str, Optional[str], str]]:
     rows = conn.execute(
-        "SELECT id, title, created_at FROM conversations ORDER BY created_at DESC"
+        "SELECT id, title, created_at FROM conversations ORDER BY updated_at DESC, created_at DESC"
     ).fetchall()
     return [(row["id"], row["title"], row["created_at"]) for row in rows]
 
@@ -114,10 +138,10 @@ def search_conversations(
             MAX(CASE WHEN LOWER(m.content) LIKE ? THEN m.content ELSE NULL END) AS snippet,
             MAX(CASE WHEN LOWER(c.title) LIKE ? THEN 1 ELSE 0 END) AS title_match,
             SUM(CASE WHEN LOWER(m.content) LIKE ? THEN 1 ELSE 0 END) AS message_matches,
-            COALESCE(MAX(m.created_at), c.created_at) AS sort_time
+            COALESCE(MAX(m.created_at), c.updated_at, c.created_at) AS sort_time
         FROM conversations c
         LEFT JOIN messages m ON m.conversation_id = c.id
-        GROUP BY c.id, c.title, c.created_at
+        GROUP BY c.id, c.title, c.created_at, c.updated_at
         HAVING title_match > 0 OR message_matches > 0
         ORDER BY title_match DESC, message_matches DESC, sort_time DESC
         LIMIT ?
@@ -250,9 +274,14 @@ def clear_memories(conn: sqlite3.Connection) -> None:
 
 def add_message(conn: sqlite3.Connection, conversation_id: str, message: Message) -> None:
     content = message.content if isinstance(message.content, str) else summarize_content(message.content)
+    now = now_iso()
     conn.execute(
         "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-        (conversation_id, message.role, content, now_iso()),
+        (conversation_id, message.role, content, now),
+    )
+    conn.execute(
+        "UPDATE conversations SET updated_at = ? WHERE id = ?",
+        (now, conversation_id),
     )
     conn.commit()
 
