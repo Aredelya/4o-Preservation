@@ -155,6 +155,23 @@ INDEX_HTML = """<!doctype html>
         background: rgba(255, 255, 255, 0.08);
         align-self: flex-start;
       }
+
+      button:disabled,
+      textarea:disabled,
+      input:disabled {
+        opacity: 0.65;
+        cursor: not-allowed;
+      }
+      
+      .bubble.pending {
+        opacity: 0.8;
+        font-style: italic;
+      }
+      
+      .bubble.error {
+        border: 1px solid rgba(255, 143, 143, 0.45);
+        background: rgba(255, 143, 143, 0.12);
+      }
       .composer {
         display: flex;
         gap: 8px;
@@ -374,6 +391,8 @@ INDEX_HTML = """<!doctype html>
         activeConversation: null,
         memories: [],
         searchQuery: "",
+        isSending: false,
+        pendingAssistantId: null,
       };
       let conversationSearchTimer = null;
 
@@ -403,19 +422,28 @@ INDEX_HTML = """<!doctype html>
         return response.json();
       };
 
+      const setComposerBusy = (busy) => {
+        state.isSending = busy;
+        messageInput.disabled = busy;
+        fileInput.disabled = busy;
+        sendMessageBtn.disabled = busy;
+        sendMessageBtn.textContent = busy ? "Sending..." : "Send";
+      };
+
       const renderConversations = () => {
         conversationList.innerHTML = "";
         state.conversations.forEach((convo) => {
           const row = document.createElement("div");
           row.className = "list-item";
+
           const button = document.createElement("button");
           const title = `${convo.title || "Untitled"} · ${convo.id.slice(0, 8)}`;
           const snippet = (convo.snippet || "").replace(/\s+/g, " ").trim();
           const preview = snippet.length > 96 ? `${snippet.slice(0, 93)}...` : snippet;
-          button.textContent = preview ? `${title}
-${preview}` : title;
+          button.textContent = preview ? `${title}\n${preview}` : title;
           button.className = convo.id === state.activeConversation ? "active" : "";
           button.onclick = () => selectConversation(convo.id);
+
           const remove = document.createElement("button");
           remove.className = "danger";
           remove.textContent = "✕";
@@ -424,6 +452,7 @@ ${preview}` : title;
             if (!confirm("Delete this conversation?")) return;
             await deleteConversation(convo.id);
           };
+
           row.appendChild(button);
           row.appendChild(remove);
           conversationList.appendChild(row);
@@ -440,7 +469,7 @@ ${preview}` : title;
 
       const shouldSkipAutoSnap = () => {
         const active = document.activeElement;
-        return active === conversationSearchInput || active === messageInput || active === memoryInput;
+        return active === conversationSearchInput || active === memoryInput;
       };
 
       const scheduleMessageBottomSnap = () => {
@@ -462,12 +491,28 @@ ${preview}` : title;
         });
       };
 
+      const createBubble = ({ role, content, extraClass = "", id = "" }) => {
+        const bubble = document.createElement("div");
+        bubble.className = `bubble ${role}${extraClass ? ` ${extraClass}` : ""}`;
+        if (id) bubble.dataset.id = id;
+        bubble.textContent = content;
+        return bubble;
+      };
+
+      const appendMessageBubble = ({ role, content, extraClass = "", id = "" }) => {
+        const bubble = createBubble({ role, content, extraClass, id });
+        messageList.appendChild(bubble);
+        scheduleMessageBottomSnap();
+        return bubble;
+      };
+
       const renderMessages = (messages = [], autoSnap = true) => {
         messageList.innerHTML = "";
         messages.forEach((message) => {
-          const bubble = document.createElement("div");
-          bubble.className = `bubble ${message.role}`;
-          bubble.textContent = message.content;
+          const bubble = createBubble({
+            role: message.role,
+            content: message.content,
+          });
           messageList.appendChild(bubble);
         });
         if (autoSnap) {
@@ -480,16 +525,21 @@ ${preview}` : title;
         state.memories.forEach((memory) => {
           const card = document.createElement("div");
           card.className = "memory-item";
+
           const text = document.createElement("div");
           text.textContent = memory.content;
+
           const meta = document.createElement("div");
           meta.className = "muted";
           meta.textContent = `#${memory.id} · ${memory.created_at}`;
+
           const actions = document.createElement("div");
           actions.className = "memory-actions";
+
           const remove = document.createElement("button");
           remove.textContent = "Delete";
           remove.onclick = () => deleteMemory(memory.id);
+
           actions.appendChild(remove);
           card.appendChild(text);
           card.appendChild(meta);
@@ -504,12 +554,18 @@ ${preview}` : title;
         const searchSuffix = query ? `?q=${encodeURIComponent(query)}` : "";
         const data = await api(`/api/conversations${searchSuffix}`);
         state.conversations = data.conversations;
+
         if (!state.activeConversation && data.conversations.length) {
           state.activeConversation = data.conversations[0].id;
         }
-        if (state.activeConversation && !state.conversations.some((convo) => convo.id === state.activeConversation)) {
+
+        if (
+          state.activeConversation &&
+          !state.conversations.some((convo) => convo.id === state.activeConversation)
+        ) {
           state.activeConversation = state.conversations.length ? state.conversations[0].id : null;
         }
+
         renderConversations();
 
         if (!refreshMessages) {
@@ -540,12 +596,14 @@ ${preview}` : title;
       };
 
       const selectConversation = async (conversationId) => {
+        if (state.isSending) return;
         state.activeConversation = conversationId;
         renderConversations();
         await loadMessages(conversationId);
       };
 
       const createConversation = async () => {
+        if (state.isSending) return;
         const data = await api("/api/conversations", { method: "POST" });
         await loadConversations({ refreshMessages: false });
         await selectConversation(data.id);
@@ -561,45 +619,97 @@ ${preview}` : title;
         return data.id;
       };
 
+      const buildAttachmentSummary = (attachments) => {
+        if (!attachments.length) return "";
+        const names = attachments.map((file) => file.name).join(", ");
+        return `[Attached: ${names}]`;
+      };
+
       const sendMessage = async () => {
+        if (state.isSending) return;
+
         const content = messageInput.value.trim();
         const files = Array.from(fileInput.files || []);
         if (!content && files.length === 0) return;
 
-        const conversationId = await ensureActiveConversation();
+        setComposerBusy(true);
 
-        const attachments = [];
-        for (const file of files) {
-          if (file.type.startsWith("image/")) {
-            const dataUrl = await new Promise((resolve) => {
-              const reader = new FileReader();
-              reader.onload = () => resolve(reader.result);
-              reader.readAsDataURL(file);
-            });
-            attachments.push({ kind: "image", name: file.name, data_url: dataUrl });
-          } else {
-            const text = await file.text();
-            attachments.push({ kind: "text", name: file.name, text });
+        let conversationId = null;
+        let pendingBubble = null;
+
+        try {
+          conversationId = await ensureActiveConversation();
+
+          const attachments = [];
+          for (const file of files) {
+            if (file.type.startsWith("image/")) {
+              const dataUrl = await new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.readAsDataURL(file);
+              });
+              attachments.push({ kind: "image", name: file.name, data_url: dataUrl });
+            } else {
+              const text = await file.text();
+              attachments.push({ kind: "text", name: file.name, text });
+            }
           }
-        }
 
-        messageInput.value = "";
-        fileInput.value = "";
-        const result = await api("/api/send", {
-          method: "POST",
-          body: JSON.stringify({
-            conversation_id: conversationId,
-            content,
-            attachments,
-          }),
-        });
+          const optimisticTextParts = [];
+          if (content) optimisticTextParts.push(content);
 
-        await loadConversations({ refreshMessages: false });
+          const attachmentSummary = buildAttachmentSummary(files);
+          if (attachmentSummary) optimisticTextParts.push(attachmentSummary);
 
-        if (result.command === "title") {
-          conversationTitle.textContent = result.title || "Chat";
-        } else {
-          await loadMessages(conversationId);
+          appendMessageBubble({
+            role: "user",
+            content: optimisticTextParts.join("\n\n") || "(Attachment upload)",
+          });
+
+          const pendingId = `pending-${Date.now()}`;
+          state.pendingAssistantId = pendingId;
+          pendingBubble = appendMessageBubble({
+            role: "assistant",
+            content: "Thinking…",
+            extraClass: "pending",
+            id: pendingId,
+          });
+
+          messageInput.value = "";
+          fileInput.value = "";
+
+          const result = await api("/api/send", {
+            method: "POST",
+            body: JSON.stringify({
+              conversation_id: conversationId,
+              content,
+              attachments,
+            }),
+          });
+
+          await loadConversations({ refreshMessages: false });
+
+          if (result.command === "title") {
+            conversationTitle.textContent = result.title || "Chat";
+          } else {
+            await loadMessages(conversationId);
+          }
+        } catch (error) {
+          if (pendingBubble) {
+            pendingBubble.textContent = `Failed to send: ${error.message}`;
+            pendingBubble.classList.remove("pending");
+            pendingBubble.classList.add("error");
+          } else {
+            appendMessageBubble({
+              role: "assistant",
+              content: `Failed to send: ${error.message}`,
+              extraClass: "error",
+            });
+          }
+        } finally {
+          state.pendingAssistantId = null;
+          setComposerBusy(false);
+          messageInput.focus();
         }
       };
 
@@ -639,18 +749,21 @@ ${preview}` : title;
       sendMessageBtn.onclick = sendMessage;
       saveMemoryBtn.onclick = addMemory;
       clearMemoriesBtn.onclick = clearMemories;
+
       messageInput.addEventListener("keydown", (event) => {
         if (event.key === "Enter" && !event.shiftKey) {
           event.preventDefault();
           sendMessage();
         }
       });
+
       conversationSearchInput.addEventListener("focus", () => {
         if (conversationSearchTimer) {
           clearTimeout(conversationSearchTimer);
           conversationSearchTimer = null;
         }
       });
+
       conversationSearchInput.addEventListener("input", () => {
         state.searchQuery = conversationSearchInput.value;
         if (conversationSearchTimer) {
@@ -660,6 +773,7 @@ ${preview}` : title;
           await loadConversations({ refreshMessages: false });
         }, 180);
       });
+
       clearConversationSearchBtn.onclick = async () => {
         if (conversationSearchTimer) {
           clearTimeout(conversationSearchTimer);
