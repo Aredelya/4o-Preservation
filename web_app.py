@@ -649,10 +649,12 @@ INDEX_HTML = """<!doctype html>
       
         setComposerBusy(true);
       
+        let pendingBubble = null;
+      
         try {
           const conversationId = await ensureActiveConversation();
       
-          // Handle /title without creating a pending assistant bubble.
+          // Handle /title as a UI command, not a chat message.
           if (content.toLowerCase().startsWith("/title")) {
             const parts = content.split(/\s+/, 2);
             const newTitle = parts.length > 1 ? parts[1].trim() : "";
@@ -703,13 +705,13 @@ INDEX_HTML = """<!doctype html>
       
           appendMessageBubble({
             role: "user",
-            content: optimisticTextParts.join("\n\n") || "(Attachment upload)",
+            content: optimisticTextParts.join("\\n\\n") || "(Attachment upload)",
           });
       
           const pendingId = `pending-${Date.now()}`;
           state.pendingAssistantId = pendingId;
       
-          appendMessageBubble({
+          pendingBubble = appendMessageBubble({
             role: "assistant",
             content: "Thinking...",
             extraClass: "pending",
@@ -731,10 +733,6 @@ INDEX_HTML = """<!doctype html>
           await loadConversations({ refreshMessages: false });
           await loadMessages(conversationId);
         } catch (error) {
-          const pendingBubble = state.pendingAssistantId
-            ? messageList.querySelector(`[data-id="${state.pendingAssistantId}"]`)
-            : null;
-      
           if (pendingBubble) {
             pendingBubble.textContent = `Failed to send: ${error.message}`;
             pendingBubble.classList.remove("pending");
