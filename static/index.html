@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>4o Preservation</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header>
+      <div>
+        <strong>4o Preservation</strong>
+        <div class="muted">Shared conversations + memories</div>
+      </div>
+      <button class="primary" id="newConversation" type="button">New chat</button>
+    </header>
+
+    <main>
+      <section class="panel-conversations">
+        <h2>Conversations</h2>
+        <div class="search-row">
+          <input
+            type="text"
+            id="conversationSearch"
+            placeholder="Search chats..."
+            aria-label="Search conversations"
+          />
+          <button id="clearConversationSearch" type="button">Clear</button>
+        </div>
+        <div class="list" id="conversationList"></div>
+      </section>
+
+      <section class="panel-chat">
+        <h2 id="conversationTitle">Chat</h2>
+        <div id="statusBanner" class="status" aria-live="polite"></div>
+        <div class="messages" id="messageList" aria-live="polite"></div>
+        <div class="composer">
+          <textarea id="messageInput" placeholder="Type a message..."></textarea>
+          <input
+            type="file"
+            id="fileInput"
+            multiple
+            accept="image/*,.txt,.md,.csv,.json,.py,.log"
+          />
+          <button class="primary" id="sendMessage" type="button">Send</button>
+        </div>
+      </section>
+
+      <section class="panel-memories">
+        <h2>Memories</h2>
+        <div class="row">
+          <input type="text" id="memoryInput" placeholder="Add a memory..." />
+          <button class="primary" id="saveMemory" type="button">Save</button>
+        </div>
+        <div class="list" id="memoryList"></div>
+        <button id="clearMemories" type="button">Clear memories</button>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
