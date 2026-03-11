@@ -17,6 +17,7 @@ from core import (
     call_openai,
     clear_memories,
     connect_db,
+    conversation_exists,
     create_conversation,
     delete_conversation,
     delete_memory,
@@ -191,10 +192,10 @@ class ChatHandler(BaseHTTPRequestHandler):
 
     def _get_conversation_messages(self, conversation_id: str) -> dict:
         with connect_db() as conn:
-            title = get_conversation_title(conn, conversation_id)
-            if title is None:
+            if not conversation_exists(conn, conversation_id):
                 raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
 
+            title = get_conversation_title(conn, conversation_id)
             messages = [
                 {"role": msg.role, "content": msg.content}
                 for msg in get_all_messages(conn, conversation_id)
@@ -228,15 +229,18 @@ class ChatHandler(BaseHTTPRequestHandler):
     def _handle_update_title(self, payload: dict) -> dict:
         conversation_id = payload.get("conversation_id")
         title = (payload.get("title") or "").strip()
-
+    
         if not conversation_id:
             raise ApiError("Missing conversation_id")
         if not title:
             raise ApiError("Missing title")
-
+    
         with connect_db() as conn:
+            if not conversation_exists(conn, conversation_id):
+                raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
+    
             updated = update_conversation_title(conn, conversation_id, title)
-
+    
         return {"updated": updated}
 
     def _handle_send_message(self, payload: dict) -> dict:
@@ -284,14 +288,13 @@ class ChatHandler(BaseHTTPRequestHandler):
         user_message = Message("user", user_content)
 
         with connect_db() as conn:
-            title = get_conversation_title(conn, conversation_id)
-            if title is None:
+            if not conversation_exists(conn, conversation_id):
                 raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
-
+        
             history = get_recent_messages(conn, conversation_id)
             system_prompt = build_system_prompt(conn, content or "Attachment upload")
             messages = [Message("system", system_prompt), *history, user_message]
-
+        
             add_message(conn, conversation_id, user_message)
 
             try:
