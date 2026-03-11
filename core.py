@@ -50,6 +50,12 @@ CREATE TABLE IF NOT EXISTS memory_embeddings (
     updated_at TEXT NOT NULL,
     FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE
 );
+
+CREATE INDEX IF NOT EXISTS idx_messages_conversation_id_id
+ON messages (conversation_id, id);
+
+CREATE INDEX IF NOT EXISTS idx_conversations_updated_at_created_at
+ON conversations (updated_at DESC, created_at DESC);
 """
 
 SYSTEM_PROMPT_TEMPLATE = """You are ChatGPT 4o running via API.
