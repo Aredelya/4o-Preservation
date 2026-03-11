@@ -642,19 +642,40 @@ INDEX_HTML = """<!doctype html>
     
       const sendMessage = async () => {
         if (state.isSending) return;
-    
+      
         const content = messageInput.value.trim();
         const files = Array.from(fileInput.files || []);
         if (!content && files.length === 0) return;
-    
+      
         setComposerBusy(true);
-    
-        let conversationId = null;
-        let pendingBubble = null;
-    
+      
         try {
-          conversationId = await ensureActiveConversation();
-    
+          const conversationId = await ensureActiveConversation();
+      
+          // Handle /title without creating a pending assistant bubble.
+          if (content.toLowerCase().startsWith("/title")) {
+            const parts = content.split(/\s+/, 2);
+            const newTitle = parts.length > 1 ? parts[1].trim() : "";
+      
+            if (!newTitle) {
+              throw new Error("Missing title text");
+            }
+      
+            await api("/api/title", {
+              method: "POST",
+              body: JSON.stringify({
+                conversation_id: conversationId,
+                title: newTitle,
+              }),
+            });
+      
+            conversationTitle.textContent = newTitle;
+            messageInput.value = "";
+            fileInput.value = "";
+            await loadConversations({ refreshMessages: false });
+            return;
+          }
+      
           const attachments = [];
           for (const file of files) {
             if (file.type.startsWith("image/")) {
@@ -669,36 +690,36 @@ INDEX_HTML = """<!doctype html>
               attachments.push({ kind: "text", name: file.name, text });
             }
           }
-    
+      
           const optimisticTextParts = [];
           if (content) {
             optimisticTextParts.push(content);
           }
-    
+      
           const attachmentSummary = buildAttachmentSummary(files);
           if (attachmentSummary) {
             optimisticTextParts.push(attachmentSummary);
           }
-    
+      
           appendMessageBubble({
             role: "user",
-            content: optimisticTextParts.join("\\n\\n") || "(Attachment upload)",
+            content: optimisticTextParts.join("\n\n") || "(Attachment upload)",
           });
-    
+      
           const pendingId = `pending-${Date.now()}`;
           state.pendingAssistantId = pendingId;
-    
-          pendingBubble = appendMessageBubble({
+      
+          appendMessageBubble({
             role: "assistant",
             content: "Thinking...",
             extraClass: "pending",
             id: pendingId,
           });
-    
+      
           messageInput.value = "";
           fileInput.value = "";
-    
-          const result = await api("/api/send", {
+      
+          await api("/api/send", {
             method: "POST",
             body: JSON.stringify({
               conversation_id: conversationId,
@@ -706,15 +727,14 @@ INDEX_HTML = """<!doctype html>
               attachments,
             }),
           });
-    
+      
           await loadConversations({ refreshMessages: false });
-    
-          if (result.command === "title") {
-            conversationTitle.textContent = result.title || "Chat";
-          } else {
-            await loadMessages(conversationId);
-          }
+          await loadMessages(conversationId);
         } catch (error) {
+          const pendingBubble = state.pendingAssistantId
+            ? messageList.querySelector(`[data-id="${state.pendingAssistantId}"]`)
+            : null;
+      
           if (pendingBubble) {
             pendingBubble.textContent = `Failed to send: ${error.message}`;
             pendingBubble.classList.remove("pending");
