@@ -1,0 +1,372 @@
+:root {
+  color-scheme: light dark;
+  --bg: #0f1115;
+  --panel: #161a22;
+  --muted: #9aa4b2;
+  --text: #eef1f6;
+  --accent: #5b8cff;
+  --border: #242a36;
+  --danger: #ff8f8f;
+  --danger-bg: rgba(255, 143, 143, 0.12);
+  --danger-border: rgba(255, 143, 143, 0.45);
+}
+
+body {
+  margin: 0;
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+header {
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+main {
+  display: grid;
+  grid-template-columns: 280px 1fr 260px;
+  gap: 16px;
+  padding: 16px;
+  height: calc(100dvh - 72px);
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+section {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+h2 {
+  font-size: 14px;
+  margin: 0;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+}
+
+.list button {
+  background: transparent;
+  border: 1px solid transparent;
+  color: inherit;
+  text-align: left;
+  padding: 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  white-space: pre-line;
+}
+
+.list-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.list-item button {
+  flex: 1;
+}
+
+.danger {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--danger);
+  cursor: pointer;
+  padding: 6px 8px;
+}
+
+.list button.active {
+  border-color: var(--accent);
+  background: rgba(91, 140, 255, 0.12);
+}
+
+.search-row {
+  display: flex;
+  gap: 8px;
+}
+
+.search-row input {
+  flex: 1;
+}
+
+.messages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-right: 4px;
+}
+
+.bubble {
+  padding: 10px 12px;
+  border-radius: 10px;
+  line-height: 1.5;
+  font-size: 15px;
+  white-space: pre-wrap;
+}
+
+.bubble.user {
+  background: rgba(91, 140, 255, 0.18);
+  align-self: flex-end;
+}
+
+.bubble.assistant {
+  background: rgba(255, 255, 255, 0.08);
+  align-self: flex-start;
+}
+
+.bubble.pending {
+  opacity: 0.8;
+  font-style: italic;
+}
+
+.bubble.error {
+  border: 1px solid var(--danger-border);
+  background: var(--danger-bg);
+}
+
+button:disabled,
+textarea:disabled,
+input:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.composer {
+  display: flex;
+  gap: 8px;
+  position: sticky;
+  bottom: 0;
+  background: var(--panel);
+  padding-top: 8px;
+}
+
+textarea {
+  flex: 1;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  color: inherit;
+  resize: none;
+  min-height: 64px;
+}
+
+button.primary {
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 10px;
+  padding: 10px 16px;
+  cursor: pointer;
+}
+
+.memory-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.memory-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.status {
+  min-height: 18px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.status.error {
+  color: var(--danger);
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+}
+
+input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  color: inherit;
+}
+
+@media (max-width: 1100px) {
+  body {
+    font-size: 16px;
+  }
+
+  header {
+    padding: 12px 14px;
+  }
+
+  main {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(120px, 18dvh) minmax(0, 1fr) minmax(220px, 30dvh);
+    min-height: calc(100dvh - 64px);
+    height: auto;
+    gap: 10px;
+    padding: 10px;
+    overflow-y: auto;
+  }
+
+  .panel-conversations,
+  .panel-memories {
+    min-height: 0;
+  }
+
+  .panel-chat {
+    min-height: 46dvh;
+  }
+
+  .panel-memories {
+    overflow-y: auto;
+    padding-bottom: 10px;
+  }
+
+  .panel-memories .list {
+    flex: 1;
+    min-height: 120px;
+  }
+
+  .panel-memories .row {
+    flex-wrap: wrap;
+  }
+
+  .panel-memories #saveMemory {
+    flex: 1 1 100%;
+  }
+
+  .panel-memories #clearMemories {
+    margin-top: 6px;
+    background: transparent;
+    border: 1px solid #8f4b4b;
+    color: #ffb3b3;
+    opacity: 0.9;
+  }
+
+  h2 {
+    font-size: 13px;
+  }
+
+  .list button {
+    padding: 10px;
+    font-size: 15px;
+  }
+
+  .messages {
+    gap: 12px;
+  }
+
+  .bubble {
+    font-size: 16px;
+    line-height: 1.6;
+    padding: 12px 13px;
+  }
+
+  .composer {
+    position: sticky;
+    bottom: 0;
+    padding-top: 8px;
+    flex-direction: column;
+  }
+
+  textarea {
+    min-height: 108px;
+    font-size: 16px;
+  }
+
+  #fileInput {
+    font-size: 15px;
+  }
+
+  button,
+  button.primary {
+    font-size: 15px;
+    min-height: 42px;
+  }
+}
+
+@media (max-width: 1100px) and (orientation: landscape) {
+  main {
+    grid-template-columns: minmax(165px, 0.8fr) minmax(0, 1.7fr) minmax(190px, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    min-height: calc(100dvh - 64px);
+    height: calc(100dvh - 64px);
+    overflow: hidden;
+  }
+
+  .panel-chat {
+    min-height: 0;
+  }
+
+  .composer {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "text send"
+      "file file";
+    align-items: stretch;
+  }
+
+  .composer textarea {
+    grid-area: text;
+    min-height: 86px;
+  }
+
+  .composer #sendMessage {
+    grid-area: send;
+    min-width: 84px;
+  }
+
+  .composer #fileInput {
+    grid-area: file;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .panel-memories .row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .panel-memories #saveMemory,
+  .panel-memories #clearMemories {
+    width: 100%;
+  }
+}
