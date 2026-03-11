@@ -48,10 +48,26 @@ const api = async (path, options = {}) => {
   return body;
 };
 
-const setStatus = (message = "", kind = "") => {
+let statusTimer = null;
+
+const setStatus = (message = "", kind = "", timeoutMs = 0) => {
   if (!statusBanner) return;
+
+  if (statusTimer) {
+    clearTimeout(statusTimer);
+    statusTimer = null;
+  }
+
   statusBanner.textContent = message;
   statusBanner.className = kind ? `status ${kind}` : "status";
+
+  if (message && timeoutMs > 0) {
+    statusTimer = setTimeout(() => {
+      statusBanner.textContent = "";
+      statusBanner.className = "status";
+      statusTimer = null;
+    }, timeoutMs);
+  }
 };
 
 const setComposerBusy = (busy) => {
@@ -355,7 +371,7 @@ const sendMessage = async () => {
       messageInput.value = "";
       fileInput.value = "";
       await loadConversations({ refreshMessages: false });
-      setStatus("Title updated.");
+      setStatus("Title updated.", "", 2000);
       return;
     }
 
@@ -434,7 +450,7 @@ const addMemory = async () => {
       body: JSON.stringify({ content }),
     });
     await loadMemories();
-    setStatus("Memory saved.");
+    setStatus("Memory saved.", "", 2000);
   } catch (error) {
     setStatus(`Failed to save memory: ${error.message}`, "error");
   }
@@ -443,7 +459,7 @@ const addMemory = async () => {
 const deleteMemory = async (id) => {
   await api(`/api/memories/${id}`, { method: "DELETE" });
   await loadMemories();
-  setStatus("Memory deleted.");
+  setStatus("Memory deleted.", "", 2000);
 };
 
 const clearMemories = async () => {
@@ -452,7 +468,7 @@ const clearMemories = async () => {
   try {
     await api("/api/memories", { method: "DELETE" });
     await loadMemories();
-    setStatus("Memories cleared.");
+    setStatus("Memories cleared.", "", 2000);
   } catch (error) {
     setStatus(`Failed to clear memories: ${error.message}`, "error");
   }
@@ -468,7 +484,7 @@ const deleteConversation = async (id) => {
   }
 
   await loadConversations();
-  setStatus("Conversation deleted.");
+  setStatus("Conversation deleted.", "", 2000);
 };
 
 const initializeApp = async () => {
@@ -491,7 +507,7 @@ const initializeApp = async () => {
 newConversationBtn.onclick = async () => {
   try {
     await createConversation();
-    setStatus("Conversation created.");
+    setStatus("Conversation created.", "", 2000);
   } catch (error) {
     setStatus(`Failed to create conversation: ${error.message}`, "error");
   }
