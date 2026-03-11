@@ -1,0 +1,569 @@
+const state = {
+  conversations: [],
+  activeConversation: null,
+  memories: [],
+  searchQuery: "",
+  isSending: false,
+};
+
+let conversationSearchTimer = null;
+let latestMessagesRequest = 0;
+let latestConversationsRequest = 0;
+
+const conversationList = document.getElementById("conversationList");
+const messageList = document.getElementById("messageList");
+const conversationTitle = document.getElementById("conversationTitle");
+const messageInput = document.getElementById("messageInput");
+const fileInput = document.getElementById("fileInput");
+const newConversationBtn = document.getElementById("newConversation");
+const sendMessageBtn = document.getElementById("sendMessage");
+const memoryInput = document.getElementById("memoryInput");
+const saveMemoryBtn = document.getElementById("saveMemory");
+const memoryList = document.getElementById("memoryList");
+const clearMemoriesBtn = document.getElementById("clearMemories");
+const conversationSearchInput = document.getElementById("conversationSearch");
+const clearConversationSearchBtn = document.getElementById("clearConversationSearch");
+const statusBanner = document.getElementById("statusBanner");
+
+const api = async (path, options = {}) => {
+  const response = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+
+  const contentType = response.headers.get("Content-Type") || "";
+  const isJson = contentType.includes("application/json");
+  const body = isJson ? await response.json() : await response.text();
+
+  if (!response.ok) {
+    const message =
+      isJson && body && typeof body === "object" && body.error
+        ? body.error
+        : typeof body === "string" && body.trim()
+          ? body
+          : "Request failed";
+    throw new Error(message);
+  }
+
+  return body;
+};
+
+const setStatus = (message = "", kind = "") => {
+  if (!statusBanner) return;
+  statusBanner.textContent = message;
+  statusBanner.className = kind ? `status ${kind}` : "status";
+};
+
+const setComposerBusy = (busy) => {
+  state.isSending = busy;
+  messageInput.disabled = busy;
+  fileInput.disabled = busy;
+  sendMessageBtn.disabled = busy;
+  sendMessageBtn.textContent = busy ? "Sending..." : "Send";
+};
+
+const createBubble = ({ role, content, extraClass = "", id = "" }) => {
+  const bubble = document.createElement("div");
+  bubble.className = `bubble ${role}${extraClass ? ` ${extraClass}` : ""}`;
+  if (id) {
+    bubble.dataset.id = id;
+  }
+  bubble.textContent = content;
+  return bubble;
+};
+
+const appendMessageBubble = ({ role, content, extraClass = "", id = "" }) => {
+  const bubble = createBubble({ role, content, extraClass, id });
+  messageList.appendChild(bubble);
+  scheduleMessageBottomSnap();
+  return bubble;
+};
+
+const renderMessages = (messages = [], autoSnap = true) => {
+  messageList.innerHTML = "";
+
+  for (const message of messages) {
+    messageList.appendChild(
+      createBubble({
+        role: message.role,
+        content: message.content,
+      })
+    );
+  }
+
+  if (autoSnap) {
+    scheduleMessageBottomSnap();
+  }
+};
+
+const renderConversations = () => {
+  conversationList.innerHTML = "";
+
+  for (const convo of state.conversations) {
+    const row = document.createElement("div");
+    row.className = "list-item";
+
+    const button = document.createElement("button");
+    const title = `${convo.title || "Untitled"} · ${convo.id.slice(0, 8)}`;
+    const snippet = (convo.snippet || "").replace(/\s+/g, " ").trim();
+    const preview = snippet.length > 96 ? `${snippet.slice(0, 93)}...` : snippet;
+    button.textContent = preview ? `${title}\n${preview}` : title;
+    button.className = convo.id === state.activeConversation ? "active" : "";
+    button.type = "button";
+    button.onclick = () => {
+      void selectConversation(convo.id);
+    };
+
+    const remove = document.createElement("button");
+    remove.className = "danger";
+    remove.textContent = "✕";
+    remove.type = "button";
+    remove.title = "Delete conversation";
+    remove.setAttribute("aria-label", "Delete conversation");
+    remove.onclick = async () => {
+      if (!confirm("Delete this conversation?")) return;
+      try {
+        await deleteConversation(convo.id);
+      } catch (error) {
+        setStatus(`Failed to delete conversation: ${error.message}`, "error");
+      }
+    };
+
+    row.appendChild(button);
+    row.appendChild(remove);
+    conversationList.appendChild(row);
+  }
+};
+
+const renderMemories = () => {
+  memoryList.innerHTML = "";
+
+  for (const memory of state.memories) {
+    const card = document.createElement("div");
+    card.className = "memory-item";
+
+    const text = document.createElement("div");
+    text.textContent = memory.content;
+
+    const meta = document.createElement("div");
+    meta.className = "muted";
+    meta.textContent = `#${memory.id} · ${memory.created_at}`;
+
+    const actions = document.createElement("div");
+    actions.className = "memory-actions";
+
+    const remove = document.createElement("button");
+    remove.textContent = "Delete";
+    remove.type = "button";
+    remove.onclick = async () => {
+      try {
+        await deleteMemory(memory.id);
+      } catch (error) {
+        setStatus(`Failed to delete memory: ${error.message}`, "error");
+      }
+    };
+
+    actions.appendChild(remove);
+    card.appendChild(text);
+    card.appendChild(meta);
+    card.appendChild(actions);
+    memoryList.appendChild(card);
+  }
+};
+
+const scrollMessagesToBottom = () => {
+  messageList.scrollTop = messageList.scrollHeight;
+  const lastBubble = messageList.lastElementChild;
+  if (lastBubble) {
+    lastBubble.scrollIntoView({ block: "end" });
+  }
+};
+
+const shouldSkipAutoSnap = () => {
+  const active = document.activeElement;
+  return active === conversationSearchInput || active === memoryInput;
+};
+
+const scheduleMessageBottomSnap = () => {
+  if (shouldSkipAutoSnap()) return;
+
+  const delays = [0, 50, 140, 280, 520];
+  for (const delay of delays) {
+    setTimeout(() => {
+      if (!shouldSkipAutoSnap()) {
+        scrollMessagesToBottom();
+      }
+    }, delay);
+  }
+
+  requestAnimationFrame(() => {
+    if (!shouldSkipAutoSnap()) {
+      scrollMessagesToBottom();
+    }
+  });
+};
+
+const loadMessages = async (conversationId) => {
+  const requestId = ++latestMessagesRequest;
+  const data = await api(`/api/conversations/${conversationId}`);
+
+  if (requestId !== latestMessagesRequest) return;
+  if (conversationId !== state.activeConversation) return;
+
+  conversationTitle.textContent = data.title || "Chat";
+  renderMessages(data.messages);
+};
+
+const loadConversations = async ({ refreshMessages = true } = {}) => {
+  const requestId = ++latestConversationsRequest;
+  const query = state.searchQuery.trim();
+  const previousActiveConversation = state.activeConversation;
+  const searchSuffix = query ? `?q=${encodeURIComponent(query)}` : "";
+  const data = await api(`/api/conversations${searchSuffix}`);
+
+  if (requestId !== latestConversationsRequest) return;
+
+  state.conversations = data.conversations;
+
+  if (!state.activeConversation && state.conversations.length) {
+    state.activeConversation = state.conversations[0].id;
+  }
+
+  if (
+    state.activeConversation &&
+    !state.conversations.some((convo) => convo.id === state.activeConversation)
+  ) {
+    state.activeConversation = state.conversations.length ? state.conversations[0].id : null;
+  }
+
+  renderConversations();
+
+  if (!refreshMessages) return;
+
+  const activeChanged = previousActiveConversation !== state.activeConversation;
+
+  if (state.activeConversation) {
+    if (activeChanged || messageList.childElementCount === 0) {
+      await loadMessages(state.activeConversation);
+    }
+  } else {
+    conversationTitle.textContent = query ? "No matching conversation" : "Chat";
+    renderMessages([], false);
+  }
+};
+
+const loadMemories = async () => {
+  const data = await api("/api/memories");
+  state.memories = data.memories;
+  renderMemories();
+};
+
+const selectConversation = async (conversationId) => {
+  if (state.isSending) return;
+  state.activeConversation = conversationId;
+  renderConversations();
+  await loadMessages(conversationId);
+};
+
+const createConversation = async () => {
+  if (state.isSending) return;
+
+  const data = await api("/api/conversations", { method: "POST" });
+  await loadConversations({ refreshMessages: false });
+  await selectConversation(data.id);
+};
+
+const ensureActiveConversation = async () => {
+  if (state.activeConversation) {
+    return state.activeConversation;
+  }
+
+  const data = await api("/api/conversations", { method: "POST" });
+  state.activeConversation = data.id;
+  await loadConversations({ refreshMessages: false });
+  return data.id;
+};
+
+const buildAttachmentSummary = (files) => {
+  if (!files.length) return "";
+  return `[Attached: ${files.map((file) => file.name).join(", ")}]`;
+};
+
+const readAttachments = async (files) => {
+  const attachments = [];
+
+  for (const file of files) {
+    if (file.type.startsWith("image/")) {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error(`Failed to read image: ${file.name}`));
+        reader.readAsDataURL(file);
+      });
+
+      attachments.push({
+        kind: "image",
+        name: file.name,
+        data_url: dataUrl,
+      });
+    } else {
+      const text = await file.text();
+      attachments.push({
+        kind: "text",
+        name: file.name,
+        text,
+      });
+    }
+  }
+
+  return attachments;
+};
+
+const sendMessage = async () => {
+  if (state.isSending) return;
+
+  const rawContent = messageInput.value;
+  const content = rawContent.trim();
+  const files = Array.from(fileInput.files || []);
+
+  if (!content && files.length === 0) return;
+
+  setComposerBusy(true);
+  setStatus("");
+
+  let pendingBubble = null;
+
+  try {
+    const conversationId = await ensureActiveConversation();
+
+    if (content.toLowerCase().startsWith("/title")) {
+      const newTitle = content.slice("/title".length).trim();
+
+      if (!newTitle) {
+        throw new Error("Missing title text");
+      }
+
+      await api("/api/title", {
+        method: "POST",
+        body: JSON.stringify({
+          conversation_id: conversationId,
+          title: newTitle,
+        }),
+      });
+
+      conversationTitle.textContent = newTitle;
+      messageInput.value = "";
+      fileInput.value = "";
+      await loadConversations({ refreshMessages: false });
+      setStatus("Title updated.");
+      return;
+    }
+
+    const attachments = await readAttachments(files);
+
+    const optimisticTextParts = [];
+    if (content) {
+      optimisticTextParts.push(content);
+    }
+
+    const attachmentSummary = buildAttachmentSummary(files);
+    if (attachmentSummary) {
+      optimisticTextParts.push(attachmentSummary);
+    }
+
+    appendMessageBubble({
+      role: "user",
+      content: optimisticTextParts.join("\n\n") || "(Attachment upload)",
+    });
+
+    pendingBubble = appendMessageBubble({
+      role: "assistant",
+      content: "Thinking...",
+      extraClass: "pending",
+      id: `pending-${Date.now()}`,
+    });
+
+    messageInput.value = "";
+    fileInput.value = "";
+
+    const result = await api("/api/send", {
+      method: "POST",
+      body: JSON.stringify({
+        conversation_id: conversationId,
+        content,
+        attachments,
+      }),
+    });
+
+    if (pendingBubble) {
+      pendingBubble.textContent = result.assistant_message?.content || "(No response)";
+      pendingBubble.classList.remove("pending");
+      pendingBubble.classList.remove("error");
+    }
+
+    await loadConversations({ refreshMessages: false });
+  } catch (error) {
+    if (pendingBubble) {
+      pendingBubble.textContent = `Failed to send: ${error.message}`;
+      pendingBubble.classList.remove("pending");
+      pendingBubble.classList.add("error");
+    } else {
+      appendMessageBubble({
+        role: "assistant",
+        content: `Failed to send: ${error.message}`,
+        extraClass: "error",
+      });
+    }
+
+    setStatus(`Failed to send: ${error.message}`, "error");
+  } finally {
+    setComposerBusy(false);
+    messageInput.focus();
+  }
+};
+
+const addMemory = async () => {
+  const content = memoryInput.value.trim();
+  if (!content) return;
+
+  memoryInput.value = "";
+
+  try {
+    await api("/api/memories", {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    });
+    await loadMemories();
+    setStatus("Memory saved.");
+  } catch (error) {
+    setStatus(`Failed to save memory: ${error.message}`, "error");
+  }
+};
+
+const deleteMemory = async (id) => {
+  await api(`/api/memories/${id}`, { method: "DELETE" });
+  await loadMemories();
+  setStatus("Memory deleted.");
+};
+
+const clearMemories = async () => {
+  if (!confirm("Clear all memories? This cannot be undone.")) return;
+
+  try {
+    await api("/api/memories", { method: "DELETE" });
+    await loadMemories();
+    setStatus("Memories cleared.");
+  } catch (error) {
+    setStatus(`Failed to clear memories: ${error.message}`, "error");
+  }
+};
+
+const deleteConversation = async (id) => {
+  await api(`/api/conversations/${id}`, { method: "DELETE" });
+
+  if (state.activeConversation === id) {
+    state.activeConversation = null;
+    conversationTitle.textContent = "Chat";
+    renderMessages([], false);
+  }
+
+  await loadConversations();
+  setStatus("Conversation deleted.");
+};
+
+const initializeApp = async () => {
+  try {
+    await loadMemories();
+  } catch (error) {
+    console.error("Failed to load memories:", error);
+    setStatus(`Failed to load memories: ${error.message}`, "error");
+  }
+
+  try {
+    await loadConversations();
+    scheduleMessageBottomSnap();
+  } catch (error) {
+    console.error("Failed to load conversations:", error);
+    setStatus(`Failed to load conversations: ${error.message}`, "error");
+  }
+};
+
+newConversationBtn.onclick = async () => {
+  try {
+    await createConversation();
+    setStatus("Conversation created.");
+  } catch (error) {
+    setStatus(`Failed to create conversation: ${error.message}`, "error");
+  }
+};
+
+sendMessageBtn.onclick = () => {
+  void sendMessage();
+};
+
+saveMemoryBtn.onclick = () => {
+  void addMemory();
+};
+
+clearMemoriesBtn.onclick = () => {
+  void clearMemories();
+};
+
+messageInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    void sendMessage();
+  }
+});
+
+conversationSearchInput.addEventListener("focus", () => {
+  if (conversationSearchTimer) {
+    clearTimeout(conversationSearchTimer);
+    conversationSearchTimer = null;
+  }
+});
+
+conversationSearchInput.addEventListener("input", () => {
+  state.searchQuery = conversationSearchInput.value;
+
+  if (conversationSearchTimer) {
+    clearTimeout(conversationSearchTimer);
+  }
+
+  conversationSearchTimer = setTimeout(() => {
+    void loadConversations({ refreshMessages: false }).catch((error) => {
+      setStatus(`Failed to search conversations: ${error.message}`, "error");
+    });
+  }, 180);
+});
+
+clearConversationSearchBtn.onclick = async () => {
+  if (conversationSearchTimer) {
+    clearTimeout(conversationSearchTimer);
+    conversationSearchTimer = null;
+  }
+
+  conversationSearchInput.value = "";
+  state.searchQuery = "";
+
+  try {
+    await loadConversations({ refreshMessages: false });
+    setStatus("");
+  } catch (error) {
+    setStatus(`Failed to clear search: ${error.message}`, "error");
+  }
+};
+
+initializeApp();
+window.addEventListener("load", scheduleMessageBottomSnap);
+window.addEventListener("pageshow", scheduleMessageBottomSnap);
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    scheduleMessageBottomSnap();
+  }
+});
+
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", scheduleMessageBottomSnap);
+}
