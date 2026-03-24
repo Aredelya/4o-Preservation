@@ -9,6 +9,7 @@ const state = {
 let conversationSearchTimer = null;
 let latestMessagesRequest = 0;
 let latestConversationsRequest = 0;
+let statusTimer = null;
 
 const conversationList = document.getElementById("conversationList");
 const messageList = document.getElementById("messageList");
@@ -24,6 +25,24 @@ const clearMemoriesBtn = document.getElementById("clearMemories");
 const conversationSearchInput = document.getElementById("conversationSearch");
 const clearConversationSearchBtn = document.getElementById("clearConversationSearch");
 const statusBanner = document.getElementById("statusBanner");
+const historyToggleBtn = document.getElementById("historyToggle");
+const closeHistoryBtn = document.getElementById("closeHistory");
+
+const mobileHistoryMedia = window.matchMedia("(max-width: 1100px) and (orientation: portrait)");
+
+const isMobileHistoryMode = () => mobileHistoryMedia.matches;
+
+const setMobileHistoryOpen = (open) => {
+  const shouldOpen = open && isMobileHistoryMode();
+  document.body.classList.toggle("mobile-history-open", shouldOpen);
+
+  if (historyToggleBtn) {
+    historyToggleBtn.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+  }
+};
+
+const closeMobileHistory = () => setMobileHistoryOpen(false);
+const openMobileHistory = () => setMobileHistoryOpen(true);
 
 const api = async (path, options = {}) => {
   const response = await fetch(path, {
@@ -42,13 +61,12 @@ const api = async (path, options = {}) => {
         : typeof body === "string" && body.trim()
           ? body
           : "Request failed";
+
     throw new Error(message);
   }
 
   return body;
 };
-
-let statusTimer = null;
 
 const setStatus = (message = "", kind = "", timeoutMs = 0) => {
   if (!statusBanner) return;
@@ -81,9 +99,11 @@ const setComposerBusy = (busy) => {
 const createBubble = ({ role, content, extraClass = "", id = "" }) => {
   const bubble = document.createElement("div");
   bubble.className = `bubble ${role}${extraClass ? ` ${extraClass}` : ""}`;
+
   if (id) {
     bubble.dataset.id = id;
   }
+
   bubble.textContent = content;
   return bubble;
 };
@@ -123,6 +143,7 @@ const renderConversations = () => {
     const title = `${convo.title || "Untitled"} · ${convo.id.slice(0, 8)}`;
     const snippet = (convo.snippet || "").replace(/\s+/g, " ").trim();
     const preview = snippet.length > 96 ? `${snippet.slice(0, 93)}...` : snippet;
+
     button.textContent = preview ? `${title}\n${preview}` : title;
     button.className = convo.id === state.activeConversation ? "active" : "";
     button.type = "button";
@@ -138,6 +159,7 @@ const renderConversations = () => {
     remove.setAttribute("aria-label", "Delete conversation");
     remove.onclick = async () => {
       if (!confirm("Delete this conversation?")) return;
+
       try {
         await deleteConversation(convo.id);
       } catch (error) {
@@ -190,6 +212,7 @@ const renderMemories = () => {
 const scrollMessagesToBottom = () => {
   messageList.scrollTop = messageList.scrollHeight;
   const lastBubble = messageList.lastElementChild;
+
   if (lastBubble) {
     lastBubble.scrollIntoView({ block: "end" });
   }
@@ -204,6 +227,7 @@ const scheduleMessageBottomSnap = () => {
   if (shouldSkipAutoSnap()) return;
 
   const delays = [0, 50, 140, 280, 520];
+
   for (const delay of delays) {
     setTimeout(() => {
       if (!shouldSkipAutoSnap()) {
@@ -276,9 +300,11 @@ const loadMemories = async () => {
 
 const selectConversation = async (conversationId) => {
   if (state.isSending) return;
+
   state.activeConversation = conversationId;
   renderConversations();
   await loadMessages(conversationId);
+  closeMobileHistory();
 };
 
 const createConversation = async () => {
@@ -287,6 +313,7 @@ const createConversation = async () => {
   const data = await api("/api/conversations", { method: "POST" });
   await loadConversations({ refreshMessages: false });
   await selectConversation(data.id);
+  closeMobileHistory();
 };
 
 const ensureActiveConversation = async () => {
@@ -525,6 +552,19 @@ clearMemoriesBtn.onclick = () => {
   void clearMemories();
 };
 
+if (historyToggleBtn) {
+  historyToggleBtn.onclick = () => {
+    const isOpen = document.body.classList.contains("mobile-history-open");
+    setMobileHistoryOpen(!isOpen);
+  };
+}
+
+if (closeHistoryBtn) {
+  closeHistoryBtn.onclick = () => {
+    closeMobileHistory();
+  };
+}
+
 messageInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
@@ -569,6 +609,12 @@ clearConversationSearchBtn.onclick = async () => {
     setStatus(`Failed to clear search: ${error.message}`, "error");
   }
 };
+
+mobileHistoryMedia.addEventListener("change", () => {
+  if (!isMobileHistoryMode()) {
+    closeMobileHistory();
+  }
+});
 
 initializeApp();
 window.addEventListener("load", scheduleMessageBottomSnap);
