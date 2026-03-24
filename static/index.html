@@ -14,7 +14,13 @@
       </div>
 
       <div class="header-actions">
-        <button id="historyToggle" type="button" class="secondary mobile-only" aria-expanded="false">
+        <button
+          id="historyToggle"
+          type="button"
+          class="secondary mobile-only"
+          aria-expanded="false"
+          aria-controls="conversationPanel"
+        >
           History
         </button>
         <button class="primary" id="newConversation" type="button">New chat</button>
@@ -22,7 +28,7 @@
     </header>
 
     <main>
-      <section class="panel-conversations" id="conversationPanel">
+      <section class="panel-conversations" id="conversationPanel" aria-label="Conversation history">
         <div class="panel-heading">
           <h2>Conversations</h2>
           <button
@@ -41,42 +47,54 @@
             id="conversationSearch"
             placeholder="Search chats..."
             aria-label="Search conversations"
+            autocomplete="off"
           />
           <button id="clearConversationSearch" type="button">Clear</button>
         </div>
 
         <div class="mobile-history-hint">Your synced chat history lives here.</div>
-        <div class="list" id="conversationList"></div>
+        <div class="list" id="conversationList" aria-live="polite"></div>
       </section>
 
-      <section class="panel-chat">
+      <section class="panel-chat" aria-label="Active conversation">
         <h2 id="conversationTitle">Chat</h2>
         <div id="statusBanner" class="status" aria-live="polite"></div>
         <div class="messages" id="messageList" aria-live="polite"></div>
 
         <div class="composer">
-          <textarea id="messageInput" placeholder="Type a message..."></textarea>
+          <textarea
+            id="messageInput"
+            placeholder="Type a message..."
+            aria-label="Message input"
+          ></textarea>
 
           <input
             type="file"
             id="fileInput"
             multiple
             accept="image/*,.txt,.md,.csv,.json,.py,.log"
+            aria-label="Attach files"
           />
 
           <button class="primary" id="sendMessage" type="button">Send</button>
         </div>
       </section>
 
-      <section class="panel-memories">
+      <section class="panel-memories" aria-label="Memories">
         <h2>Memories</h2>
 
         <div class="row">
-          <input type="text" id="memoryInput" placeholder="Add a memory..." />
+          <input
+            type="text"
+            id="memoryInput"
+            placeholder="Add a memory..."
+            aria-label="Add memory"
+            autocomplete="off"
+          />
           <button class="primary" id="saveMemory" type="button">Save</button>
         </div>
 
-        <div class="list" id="memoryList"></div>
+        <div class="list" id="memoryList" aria-live="polite"></div>
         <button id="clearMemories" type="button">Clear memories</button>
       </section>
     </main>
