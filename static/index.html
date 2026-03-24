@@ -7,56 +7,107 @@
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <header>
-      <div>
-        <strong>4o Preservation</strong>
-        <div class="muted">Shared conversations + memories</div>
-      </div>
-      <button class="primary" id="newConversation" type="button">New chat</button>
-    </header>
-
-    <main>
-      <section class="panel-conversations">
-        <h2>Conversations</h2>
-        <div class="search-row">
-          <input
-            type="text"
-            id="conversationSearch"
-            placeholder="Search chats..."
-            aria-label="Search conversations"
-          />
-          <button id="clearConversationSearch" type="button">Clear</button>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">4o</div>
+          <div>
+            <strong>4o Preservation</strong>
+            <div class="muted">Shared conversations, searchable history, and long-term memories.</div>
+          </div>
         </div>
-        <div class="list" id="conversationList"></div>
-      </section>
 
-      <section class="panel-chat">
-        <h2 id="conversationTitle">Chat</h2>
-        <div id="statusBanner" class="status" aria-live="polite"></div>
-        <div class="messages" id="messageList" aria-live="polite"></div>
-        <div class="composer">
-          <textarea id="messageInput" placeholder="Type a message..."></textarea>
-          <input
-            type="file"
-            id="fileInput"
-            multiple
-            accept="image/*,.txt,.md,.csv,.json,.py,.log"
-          />
-          <button class="primary" id="sendMessage" type="button">Send</button>
+        <div class="topbar-actions">
+          <div class="pill">Local-first web UI</div>
+          <button class="primary" id="newConversation" type="button">New chat</button>
         </div>
-      </section>
+      </header>
 
-      <section class="panel-memories">
-        <h2>Memories</h2>
-        <div class="row">
-          <input type="text" id="memoryInput" placeholder="Add a memory..." />
-          <button class="primary" id="saveMemory" type="button">Save</button>
-        </div>
-        <div class="list" id="memoryList"></div>
-        <button id="clearMemories" type="button">Clear memories</button>
-      </section>
-    </main>
+      <main class="workspace">
+        <aside class="panel panel-conversations">
+          <div class="panel-header sticky-header">
+            <div>
+              <div class="eyebrow">Sidebar</div>
+              <h2>Conversations</h2>
+            </div>
+          </div>
+
+          <div class="search-row glass-row">
+            <input
+              type="text"
+              id="conversationSearch"
+              placeholder="Search chats, titles, or message text"
+              aria-label="Search conversations"
+            />
+            <button id="clearConversationSearch" type="button">Clear</button>
+          </div>
+
+          <div class="panel-note muted">Your synced chat history lives here.</div>
+          <div class="list conversation-list" id="conversationList"></div>
+        </aside>
+
+        <section class="panel panel-chat chat-panel">
+          <div class="panel-header chat-header">
+            <div>
+              <div class="eyebrow">Active conversation</div>
+              <h2 id="conversationTitle">Chat</h2>
+            </div>
+            <div class="chat-header-actions muted">Press Enter to send · Shift+Enter for a new line</div>
+          </div>
+
+          <div id="statusBanner" class="status" aria-live="polite"></div>
+
+          <div class="messages-frame">
+            <div class="messages" id="messageList" aria-live="polite"></div>
+          </div>
+
+          <div class="composer-wrap">
+            <div class="composer-toolbar">
+              <label class="file-picker" for="fileInput">Attach files</label>
+              <div class="muted small">Images, text, JSON, Markdown, Python, logs</div>
+            </div>
+
+            <div class="composer">
+              <textarea
+                id="messageInput"
+                placeholder="Message your preserved 4o chat…"
+              ></textarea>
+              <input
+                type="file"
+                id="fileInput"
+                multiple
+                accept="image/*,.txt,.md,.csv,.json,.py,.log"
+              />
+              <button class="primary send-button" id="sendMessage" type="button">Send</button>
+            </div>
+          </div>
+        </section>
+
+        <aside class="panel panel-memories">
+          <div class="panel-header sticky-header">
+            <div>
+              <div class="eyebrow">Context</div>
+              <h2>Memories</h2>
+            </div>
+          </div>
+
+          <div class="panel-note muted">
+            Saved memories are injected into future chats so the assistant keeps useful context.
+          </div>
+
+          <div class="row memory-entry glass-row">
+            <input type="text" id="memoryInput" placeholder="Add a memory worth keeping…" />
+            <button class="primary" id="saveMemory" type="button">Save</button>
+          </div>
+
+          <div class="list memory-list" id="memoryList"></div>
+
+          <button id="clearMemories" type="button">Clear memories</button>
+        </aside>
+      </main>
+    </div>
 
     <script src="/static/app.js"></script>
   </body>
 </html>
+EOF
