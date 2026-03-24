@@ -1,619 +1,631 @@
-:root {
-  color-scheme: dark;
-  --bg: #0a0d14;
-  --bg-accent:
-    radial-gradient(circle at top, rgba(102, 145, 255, 0.16), transparent 28%),
-    radial-gradient(circle at 85% 10%, rgba(67, 212, 181, 0.14), transparent 24%),
-    linear-gradient(180deg, #0b0f17 0%, #090c13 100%);
-  --panel: rgba(18, 24, 36, 0.82);
-  --panel-strong: rgba(14, 19, 31, 0.94);
-  --border: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.13);
-  --text: #eff4ff;
-  --muted: #9ca7bd;
-  --accent: #7aa2ff;
-  --accent-strong: #5d8eff;
-  --danger: #ffb1b1;
-  --danger-bg: rgba(255, 99, 99, 0.12);
-  --danger-border: rgba(255, 137, 137, 0.4);
-  --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.38);
-  --shadow-md: 0 14px 30px rgba(0, 0, 0, 0.24);
-  --radius-xl: 24px;
-  --radius-lg: 18px;
-  --radius-md: 14px;
-  --radius-sm: 10px;
-  --header-height: 88px;
-}
+const state = {
+  conversations: [],
+  activeConversation: null,
+  memories: [],
+  searchQuery: "",
+  isSending: false,
+};
 
-* {
-  box-sizing: border-box;
-}
+let conversationSearchTimer = null;
+let latestMessagesRequest = 0;
+let latestConversationsRequest = 0;
+let statusTimer = null;
 
-html,
-body {
-  margin: 0;
-  min-height: 100%;
-}
+const conversationList = document.getElementById("conversationList");
+const messageList = document.getElementById("messageList");
+const conversationTitle = document.getElementById("conversationTitle");
+const messageInput = document.getElementById("messageInput");
+const fileInput = document.getElementById("fileInput");
+const newConversationBtn = document.getElementById("newConversation");
+const sendMessageBtn = document.getElementById("sendMessage");
+const memoryInput = document.getElementById("memoryInput");
+const saveMemoryBtn = document.getElementById("saveMemory");
+const memoryList = document.getElementById("memoryList");
+const clearMemoriesBtn = document.getElementById("clearMemories");
+const conversationSearchInput = document.getElementById("conversationSearch");
+const clearConversationSearchBtn = document.getElementById("clearConversationSearch");
+const statusBanner = document.getElementById("statusBanner");
+const historyToggleBtn = document.getElementById("historyToggle");
+const closeHistoryBtn = document.getElementById("closeHistory");
 
-body {
-  font-family:
-    Inter,
-    ui-sans-serif,
-    system-ui,
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    sans-serif;
-  background: var(--bg-accent);
-  color: var(--text);
-}
+const mobileHistoryMedia = window.matchMedia("(max-width: 1100px) and (orientation: portrait)");
 
-button,
-input,
-textarea {
-  font: inherit;
-}
+const isMobileHistoryMode = () => mobileHistoryMedia.matches;
 
-button {
-  transition:
-    transform 140ms ease,
-    border-color 140ms ease,
-    background 140ms ease,
-    opacity 140ms ease;
-}
+const setMobileHistoryOpen = (open) => {
+  const shouldOpen = open && isMobileHistoryMode();
+  document.body.classList.toggle("mobile-history-open", shouldOpen);
 
-button:hover:not(:disabled) {
-  transform: translateY(-1px);
-}
+  if (historyToggleBtn) {
+    historyToggleBtn.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+  }
+};
 
-button:disabled,
-textarea:disabled,
-input:disabled {
-  opacity: 0.62;
-  cursor: not-allowed;
-}
+const closeMobileHistory = () => setMobileHistoryOpen(false);
+const openMobileHistory = () => setMobileHistoryOpen(true);
 
-input,
-textarea,
-button {
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-}
+const api = async (path, options = {}) => {
+  const response = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
 
-input,
-textarea {
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text);
-  padding: 12px 14px;
-  outline: none;
-}
+  const contentType = response.headers.get("Content-Type") || "";
+  const isJson = contentType.includes("application/json");
+  const body = isJson ? await response.json() : await response.text();
 
-input::placeholder,
-textarea::placeholder {
-  color: #8791a6;
-}
+  if (!response.ok) {
+    const message =
+      isJson && body && typeof body === "object" && body.error
+        ? body.error
+        : typeof body === "string" && body.trim()
+          ? body
+          : "Request failed";
 
-input:focus,
-textarea:focus {
-  border-color: rgba(122, 162, 255, 0.55);
-  box-shadow: 0 0 0 4px rgba(122, 162, 255, 0.12);
-}
-
-textarea {
-  resize: none;
-  min-height: 96px;
-  line-height: 1.5;
-}
-
-button {
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text);
-  padding: 11px 14px;
-  cursor: pointer;
-}
-
-button.primary {
-  background: linear-gradient(180deg, var(--accent) 0%, var(--accent-strong) 100%);
-  border: none;
-  color: #fff;
-  font-weight: 700;
-  box-shadow: 0 12px 24px rgba(93, 142, 255, 0.24);
-}
-
-button.primary:hover:not(:disabled) {
-  box-shadow: 0 16px 28px rgba(93, 142, 255, 0.3);
-}
-
-.secondary {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: inherit;
-}
-
-#clearMemories {
-  border-color: rgba(255, 118, 118, 0.28);
-  color: var(--danger);
-  background: rgba(255, 118, 118, 0.06);
-}
-
-header {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 18px 22px;
-  margin: 18px 18px 0;
-  min-height: var(--header-height);
-  border: 1px solid var(--border);
-  background: var(--panel);
-  backdrop-filter: blur(18px);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-md);
-}
-
-header strong {
-  display: block;
-  font-size: 1.1rem;
-  letter-spacing: 0.01em;
-}
-
-.header-actions,
-.panel-heading {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.header-actions {
-  margin-left: auto;
-}
-
-.panel-heading {
-  justify-content: space-between;
-}
-
-.mobile-only {
-  display: none;
-}
-
-main {
-  display: grid;
-  grid-template-columns: minmax(260px, 300px) minmax(0, 1fr) minmax(280px, 340px);
-  gap: 16px;
-  min-height: calc(100dvh - var(--header-height) - 52px);
-  height: calc(100dvh - var(--header-height) - 52px);
-  padding: 16px 18px 18px;
-}
-
-.panel-conversations,
-.panel-chat,
-.panel-memories {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
-  background: var(--panel);
-  backdrop-filter: blur(20px);
-  box-shadow: var(--shadow-lg);
-  overflow: hidden;
-}
-
-.panel-chat {
-  background: linear-gradient(180deg, rgba(18, 24, 36, 0.95) 0%, rgba(13, 18, 29, 0.98) 100%);
-}
-
-.panel-conversations,
-.panel-memories {
-  padding: 18px;
-}
-
-.panel-chat {
-  padding: 18px 18px 14px;
-}
-
-h2 {
-  margin: 0 0 14px;
-  font-size: 1.05rem;
-}
-
-.search-row,
-.row {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 14px;
-}
-
-.search-row input,
-.row input {
-  width: 100%;
-}
-
-.mobile-history-hint {
-  display: none;
-  margin: -2px 0 12px;
-  font-size: 13px;
-  color: var(--muted);
-}
-
-.list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  min-height: 0;
-  overflow-y: auto;
-  padding-right: 4px;
-}
-
-.list-item {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-}
-
-.list-item button {
-  text-align: left;
-  white-space: pre-wrap;
-  border-color: transparent;
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.list-item button:first-child {
-  padding: 14px;
-  line-height: 1.45;
-}
-
-.list-item button:first-child:hover,
-.list-item button.active {
-  border-color: rgba(122, 162, 255, 0.36);
-  background: linear-gradient(180deg, rgba(122, 162, 255, 0.14), rgba(122, 162, 255, 0.08));
-}
-
-.list-item .danger {
-  min-width: 42px;
-  padding-inline: 0;
-  color: var(--danger);
-  border-color: rgba(255, 118, 118, 0.22);
-  background: rgba(255, 118, 118, 0.06);
-}
-
-.status {
-  margin: 0 0 14px;
-  min-height: 0;
-  padding: 0;
-  color: var(--muted);
-}
-
-.status:not(:empty) {
-  min-height: 44px;
-  padding: 12px 14px;
-  border-radius: var(--radius-md);
-  border: 1px solid rgba(122, 162, 255, 0.22);
-  background: rgba(122, 162, 255, 0.08);
-}
-
-.status.error:not(:empty) {
-  color: var(--danger);
-  border-color: var(--danger-border);
-  background: var(--danger-bg);
-}
-
-.messages {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  padding-right: 6px;
-}
-
-.messages:empty::before {
-  content: "Start a conversation. Your saved memories will still be available in context.";
-  display: block;
-  margin: auto 0;
-  padding: 18px;
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--radius-lg);
-  color: var(--muted);
-  text-align: center;
-  background: rgba(255, 255, 255, 0.025);
-}
-
-.bubble {
-  max-width: min(78ch, 84%);
-  padding: 14px 16px;
-  border-radius: 18px;
-  line-height: 1.6;
-  font-size: 0.97rem;
-  white-space: pre-wrap;
-  border: 1px solid transparent;
-}
-
-.bubble.user {
-  align-self: flex-end;
-  background: linear-gradient(180deg, rgba(122, 162, 255, 0.22), rgba(122, 162, 255, 0.14));
-  border-color: rgba(122, 162, 255, 0.24);
-  border-bottom-right-radius: 6px;
-}
-
-.bubble.assistant {
-  align-self: flex-start;
-  background: rgba(255, 255, 255, 0.05);
-  border-color: rgba(255, 255, 255, 0.08);
-  border-bottom-left-radius: 6px;
-}
-
-.bubble.pending {
-  opacity: 0.82;
-  font-style: italic;
-}
-
-.bubble.error {
-  border-color: var(--danger-border);
-  background: var(--danger-bg);
-}
-
-.composer {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-areas:
-    "text send"
-    "file file";
-  gap: 10px;
-  position: static;
-  bottom: auto;
-  background: rgba(14, 19, 31, 0.94);
-  padding: 14px;
-  margin-top: auto;
-  border-top: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-}
-
-.composer textarea {
-  grid-area: text;
-  min-height: 104px;
-}
-
-.composer #fileInput {
-  grid-area: file;
-  width: 100%;
-  min-width: 0;
-  padding: 10px 12px;
-}
-
-#sendMessage {
-  grid-area: send;
-  min-width: 104px;
-}
-
-.memory-item {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.035);
-}
-
-.memory-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.muted {
-  color: var(--muted);
-}
-
-::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-
-::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
-  border-radius: 999px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-@media (max-width: 1180px) {
-  main {
-    grid-template-columns: 250px minmax(0, 1fr);
-    grid-template-areas:
-      "left center"
-      "right center";
+    throw new Error(message);
   }
 
-  .panel-conversations {
-    grid-area: left;
+  return body;
+};
+
+const setStatus = (message = "", kind = "", timeoutMs = 0) => {
+  if (!statusBanner) return;
+
+  if (statusTimer) {
+    clearTimeout(statusTimer);
+    statusTimer = null;
   }
 
-  .panel-chat {
-    grid-area: center;
+  statusBanner.textContent = message;
+  statusBanner.className = kind ? `status ${kind}` : "status";
+
+  if (message && timeoutMs > 0) {
+    statusTimer = setTimeout(() => {
+      statusBanner.textContent = "";
+      statusBanner.className = "status";
+      statusTimer = null;
+    }, timeoutMs);
+  }
+};
+
+const setComposerBusy = (busy) => {
+  state.isSending = busy;
+  messageInput.disabled = busy;
+  fileInput.disabled = busy;
+  sendMessageBtn.disabled = busy;
+  sendMessageBtn.textContent = busy ? "Sending..." : "Send";
+};
+
+const createBubble = ({ role, content, extraClass = "", id = "" }) => {
+  const bubble = document.createElement("div");
+  bubble.className = `bubble ${role}${extraClass ? ` ${extraClass}` : ""}`;
+
+  if (id) {
+    bubble.dataset.id = id;
   }
 
-  .panel-memories {
-    grid-area: right;
+  bubble.textContent = content;
+  return bubble;
+};
+
+const appendMessageBubble = ({ role, content, extraClass = "", id = "" }) => {
+  const bubble = createBubble({ role, content, extraClass, id });
+  messageList.appendChild(bubble);
+  scheduleMessageBottomSnap();
+  return bubble;
+};
+
+const renderMessages = (messages = [], autoSnap = true) => {
+  messageList.innerHTML = "";
+
+  for (const message of messages) {
+    messageList.appendChild(
+      createBubble({
+        role: message.role,
+        content: message.content,
+      })
+    );
   }
+
+  if (autoSnap) {
+    scheduleMessageBottomSnap();
+  }
+};
+
+const renderConversations = () => {
+  conversationList.innerHTML = "";
+
+  for (const convo of state.conversations) {
+    const row = document.createElement("div");
+    row.className = "list-item";
+
+    const button = document.createElement("button");
+    const title = `${convo.title || "Untitled"} · ${convo.id.slice(0, 8)}`;
+    const snippet = (convo.snippet || "").replace(/\s+/g, " ").trim();
+    const preview = snippet.length > 96 ? `${snippet.slice(0, 93)}...` : snippet;
+
+    button.textContent = preview ? `${title}\n${preview}` : title;
+    button.className = convo.id === state.activeConversation ? "active" : "";
+    button.type = "button";
+    button.onclick = () => {
+      void selectConversation(convo.id);
+    };
+
+    const remove = document.createElement("button");
+    remove.className = "danger";
+    remove.textContent = "✕";
+    remove.type = "button";
+    remove.title = "Delete conversation";
+    remove.setAttribute("aria-label", "Delete conversation");
+    remove.onclick = async () => {
+      if (!confirm("Delete this conversation?")) return;
+
+      try {
+        await deleteConversation(convo.id);
+      } catch (error) {
+        setStatus(`Failed to delete conversation: ${error.message}`, "error");
+      }
+    };
+
+    row.appendChild(button);
+    row.appendChild(remove);
+    conversationList.appendChild(row);
+  }
+};
+
+const renderMemories = () => {
+  memoryList.innerHTML = "";
+
+  for (const memory of state.memories) {
+    const card = document.createElement("div");
+    card.className = "memory-item";
+
+    const text = document.createElement("div");
+    text.textContent = memory.content;
+
+    const meta = document.createElement("div");
+    meta.className = "muted";
+    meta.textContent = `#${memory.id} · ${memory.created_at}`;
+
+    const actions = document.createElement("div");
+    actions.className = "memory-actions";
+
+    const remove = document.createElement("button");
+    remove.textContent = "Delete";
+    remove.type = "button";
+    remove.onclick = async () => {
+      try {
+        await deleteMemory(memory.id);
+      } catch (error) {
+        setStatus(`Failed to delete memory: ${error.message}`, "error");
+      }
+    };
+
+    actions.appendChild(remove);
+    card.appendChild(text);
+    card.appendChild(meta);
+    card.appendChild(actions);
+    memoryList.appendChild(card);
+  }
+};
+
+const scrollMessagesToBottom = () => {
+  messageList.scrollTop = messageList.scrollHeight;
+  const lastBubble = messageList.lastElementChild;
+
+  if (lastBubble) {
+    lastBubble.scrollIntoView({ block: "end" });
+  }
+};
+
+const shouldSkipAutoSnap = () => {
+  const active = document.activeElement;
+  return active === conversationSearchInput || active === memoryInput;
+};
+
+const scheduleMessageBottomSnap = () => {
+  if (shouldSkipAutoSnap()) return;
+
+  const delays = [0, 50, 140, 280, 520];
+
+  for (const delay of delays) {
+    setTimeout(() => {
+      if (!shouldSkipAutoSnap()) {
+        scrollMessagesToBottom();
+      }
+    }, delay);
+  }
+
+  requestAnimationFrame(() => {
+    if (!shouldSkipAutoSnap()) {
+      scrollMessagesToBottom();
+    }
+  });
+};
+
+const loadMessages = async (conversationId) => {
+  const requestId = ++latestMessagesRequest;
+  const data = await api(`/api/conversations/${conversationId}`);
+
+  if (requestId !== latestMessagesRequest) return;
+  if (conversationId !== state.activeConversation) return;
+
+  conversationTitle.textContent = data.title || "Chat";
+  renderMessages(data.messages);
+};
+
+const loadConversations = async ({ refreshMessages = true } = {}) => {
+  const requestId = ++latestConversationsRequest;
+  const query = state.searchQuery.trim();
+  const previousActiveConversation = state.activeConversation;
+  const searchSuffix = query ? `?q=${encodeURIComponent(query)}` : "";
+  const data = await api(`/api/conversations${searchSuffix}`);
+
+  if (requestId !== latestConversationsRequest) return;
+
+  state.conversations = data.conversations;
+
+  if (!state.activeConversation && state.conversations.length) {
+    state.activeConversation = state.conversations[0].id;
+  }
+
+  if (
+    state.activeConversation &&
+    !state.conversations.some((convo) => convo.id === state.activeConversation)
+  ) {
+    state.activeConversation = state.conversations.length ? state.conversations[0].id : null;
+  }
+
+  renderConversations();
+
+  if (!refreshMessages) return;
+
+  const activeChanged = previousActiveConversation !== state.activeConversation;
+
+  if (state.activeConversation) {
+    if (activeChanged || messageList.childElementCount === 0) {
+      await loadMessages(state.activeConversation);
+    }
+  } else {
+    conversationTitle.textContent = query ? "No matching conversation" : "Chat";
+    renderMessages([], false);
+  }
+};
+
+const loadMemories = async () => {
+  const data = await api("/api/memories");
+  state.memories = data.memories;
+  renderMemories();
+};
+
+const selectConversation = async (conversationId) => {
+  if (state.isSending) return;
+
+  state.activeConversation = conversationId;
+  renderConversations();
+  await loadMessages(conversationId);
+  closeMobileHistory();
+};
+
+const createConversation = async () => {
+  if (state.isSending) return;
+
+  const data = await api("/api/conversations", { method: "POST" });
+  await loadConversations({ refreshMessages: false });
+  await selectConversation(data.id);
+  closeMobileHistory();
+};
+
+const ensureActiveConversation = async () => {
+  if (state.activeConversation) {
+    return state.activeConversation;
+  }
+
+  const data = await api("/api/conversations", { method: "POST" });
+  state.activeConversation = data.id;
+  await loadConversations({ refreshMessages: false });
+  return data.id;
+};
+
+const buildAttachmentSummary = (files) => {
+  if (!files.length) return "";
+  return `[Attached: ${files.map((file) => file.name).join(", ")}]`;
+};
+
+const readAttachments = async (files) => {
+  const attachments = [];
+
+  for (const file of files) {
+    if (file.type.startsWith("image/")) {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error(`Failed to read image: ${file.name}`));
+        reader.readAsDataURL(file);
+      });
+
+      attachments.push({
+        kind: "image",
+        name: file.name,
+        data_url: dataUrl,
+      });
+    } else {
+      const text = await file.text();
+      attachments.push({
+        kind: "text",
+        name: file.name,
+        text,
+      });
+    }
+  }
+
+  return attachments;
+};
+
+const sendMessage = async () => {
+  if (state.isSending) return;
+
+  const rawContent = messageInput.value;
+  const content = rawContent.trim();
+  const files = Array.from(fileInput.files || []);
+
+  if (!content && files.length === 0) return;
+
+  setComposerBusy(true);
+  setStatus("");
+
+  let pendingBubble = null;
+
+  try {
+    const conversationId = await ensureActiveConversation();
+
+    if (content.toLowerCase().startsWith("/title")) {
+      const newTitle = content.slice("/title".length).trim();
+
+      if (!newTitle) {
+        throw new Error("Missing title text");
+      }
+
+      await api("/api/title", {
+        method: "POST",
+        body: JSON.stringify({
+          conversation_id: conversationId,
+          title: newTitle,
+        }),
+      });
+
+      conversationTitle.textContent = newTitle;
+      messageInput.value = "";
+      fileInput.value = "";
+      await loadConversations({ refreshMessages: false });
+      setStatus("Title updated.", "", 2000);
+      return;
+    }
+
+    const attachments = await readAttachments(files);
+
+    const optimisticTextParts = [];
+    if (content) {
+      optimisticTextParts.push(content);
+    }
+
+    const attachmentSummary = buildAttachmentSummary(files);
+    if (attachmentSummary) {
+      optimisticTextParts.push(attachmentSummary);
+    }
+
+    appendMessageBubble({
+      role: "user",
+      content: optimisticTextParts.join("\n\n") || "(Attachment upload)",
+    });
+
+    pendingBubble = appendMessageBubble({
+      role: "assistant",
+      content: "Thinking...",
+      extraClass: "pending",
+      id: `pending-${Date.now()}`,
+    });
+
+    messageInput.value = "";
+    fileInput.value = "";
+
+    const result = await api("/api/send", {
+      method: "POST",
+      body: JSON.stringify({
+        conversation_id: conversationId,
+        content,
+        attachments,
+      }),
+    });
+
+    if (pendingBubble) {
+      pendingBubble.textContent = result.assistant_message?.content || "(No response)";
+      pendingBubble.classList.remove("pending");
+      pendingBubble.classList.remove("error");
+    }
+
+    await loadConversations({ refreshMessages: false });
+  } catch (error) {
+    if (pendingBubble) {
+      pendingBubble.textContent = `Failed to send: ${error.message}`;
+      pendingBubble.classList.remove("pending");
+      pendingBubble.classList.add("error");
+    } else {
+      appendMessageBubble({
+        role: "assistant",
+        content: `Failed to send: ${error.message}`,
+        extraClass: "error",
+      });
+    }
+
+    setStatus(`Failed to send: ${error.message}`, "error");
+  } finally {
+    setComposerBusy(false);
+    messageInput.focus();
+  }
+};
+
+const addMemory = async () => {
+  const content = memoryInput.value.trim();
+  if (!content) return;
+
+  memoryInput.value = "";
+
+  try {
+    await api("/api/memories", {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    });
+    await loadMemories();
+    setStatus("Memory saved.", "", 2000);
+  } catch (error) {
+    setStatus(`Failed to save memory: ${error.message}`, "error");
+  }
+};
+
+const deleteMemory = async (id) => {
+  await api(`/api/memories/${id}`, { method: "DELETE" });
+  await loadMemories();
+  setStatus("Memory deleted.", "", 2000);
+};
+
+const clearMemories = async () => {
+  if (!confirm("Clear all memories? This cannot be undone.")) return;
+
+  try {
+    await api("/api/memories", { method: "DELETE" });
+    await loadMemories();
+    setStatus("Memories cleared.", "", 2000);
+  } catch (error) {
+    setStatus(`Failed to clear memories: ${error.message}`, "error");
+  }
+};
+
+const deleteConversation = async (id) => {
+  await api(`/api/conversations/${id}`, { method: "DELETE" });
+
+  if (state.activeConversation === id) {
+    state.activeConversation = null;
+    conversationTitle.textContent = "Chat";
+    renderMessages([], false);
+  }
+
+  await loadConversations();
+  setStatus("Conversation deleted.", "", 2000);
+};
+
+const initializeApp = async () => {
+  try {
+    await loadMemories();
+  } catch (error) {
+    console.error("Failed to load memories:", error);
+    setStatus(`Failed to load memories: ${error.message}`, "error");
+  }
+
+  try {
+    await loadConversations();
+    scheduleMessageBottomSnap();
+  } catch (error) {
+    console.error("Failed to load conversations:", error);
+    setStatus(`Failed to load conversations: ${error.message}`, "error");
+  }
+};
+
+newConversationBtn.onclick = async () => {
+  try {
+    await createConversation();
+    setStatus("Conversation created.", "", 2000);
+  } catch (error) {
+    setStatus(`Failed to create conversation: ${error.message}`, "error");
+  }
+};
+
+sendMessageBtn.onclick = () => {
+  void sendMessage();
+};
+
+saveMemoryBtn.onclick = () => {
+  void addMemory();
+};
+
+clearMemoriesBtn.onclick = () => {
+  void clearMemories();
+};
+
+if (historyToggleBtn) {
+  historyToggleBtn.onclick = () => {
+    const isOpen = document.body.classList.contains("mobile-history-open");
+    setMobileHistoryOpen(!isOpen);
+  };
 }
 
-@media (max-width: 1100px) {
-  body {
-    font-size: 16px;
-  }
-
-  header {
-    padding: 12px 14px;
-    margin: 10px 10px 0;
-    min-height: 64px;
-  }
-
-  .mobile-only {
-    display: inline-flex;
-  }
-
-  main {
-    grid-template-columns: 1fr;
-    grid-template-rows: minmax(0, 1fr) minmax(220px, 30dvh);
-    grid-template-areas:
-      "center"
-      "right";
-    min-height: calc(100dvh - 84px);
-    height: calc(100dvh - 84px);
-    gap: 10px;
-    padding: 10px;
-    overflow: hidden;
-  }
-
-  .panel-chat {
-    min-height: 0;
-  }
-
-  .panel-conversations {
-    position: fixed;
-    top: 74px;
-    left: 10px;
-    right: 10px;
-    bottom: 10px;
-    z-index: 30;
-    padding: 18px;
-    box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45);
-    transform: translateY(110%);
-    opacity: 0;
-    pointer-events: none;
-    transition:
-      transform 0.2s ease,
-      opacity 0.2s ease;
-  }
-
-  body.mobile-history-open .panel-conversations {
-    transform: translateY(0);
-    opacity: 1;
-    pointer-events: auto;
-  }
-
-  .mobile-history-hint {
-    display: block;
-  }
-
-  .panel-memories {
-    overflow-y: auto;
-    padding-bottom: 10px;
-  }
-
-  .panel-memories .list {
-    flex: 1;
-    min-height: 120px;
-  }
-
-  .panel-memories .row {
-    flex-wrap: wrap;
-  }
-
-  .panel-memories #saveMemory {
-    flex: 1 1 100%;
-  }
-
-  .panel-memories #clearMemories {
-    margin-top: 6px;
-    background: transparent;
-    border: 1px solid #8f4b4b;
-    color: #ffb3b3;
-    opacity: 0.9;
-  }
-
-  h2 {
-    font-size: 13px;
-  }
-
-  .list button {
-    padding: 10px;
-    font-size: 15px;
-  }
-
-  .bubble {
-    max-width: 100%;
-    font-size: 16px;
-    line-height: 1.6;
-    padding: 12px 13px;
-  }
-
-  .composer {
-    position: sticky;
-    bottom: 0;
-    padding-top: 8px;
-    margin-top: 0;
-    border-top: 0;
-    grid-template-columns: 1fr;
-    grid-template-areas:
-      "text"
-      "file"
-      "send";
-  }
-
-  textarea {
-    min-height: 108px;
-    font-size: 16px;
-  }
-
-  #fileInput {
-    font-size: 15px;
-  }
-
-  button,
-  button.primary {
-    font-size: 15px;
-    min-height: 42px;
-  }
-
-  .search-row,
-  .row {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  #clearConversationSearch,
-  #clearMemories,
-  #saveMemory,
-  #sendMessage {
-    width: 100%;
-  }
+if (closeHistoryBtn) {
+  closeHistoryBtn.onclick = () => {
+    closeMobileHistory();
+  };
 }
 
-@media (max-width: 1100px) and (orientation: landscape) {
-  .mobile-only {
-    display: none;
+messageInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    void sendMessage();
+  }
+});
+
+conversationSearchInput.addEventListener("focus", () => {
+  if (conversationSearchTimer) {
+    clearTimeout(conversationSearchTimer);
+    conversationSearchTimer = null;
+  }
+});
+
+conversationSearchInput.addEventListener("input", () => {
+  state.searchQuery = conversationSearchInput.value;
+
+  if (conversationSearchTimer) {
+    clearTimeout(conversationSearchTimer);
   }
 
-  main {
-    grid-template-columns: 250px minmax(0, 1fr);
-    grid-template-rows: 1fr;
-    grid-template-areas:
-      "left center";
+  conversationSearchTimer = setTimeout(() => {
+    void loadConversations({ refreshMessages: false }).catch((error) => {
+      setStatus(`Failed to search conversations: ${error.message}`, "error");
+    });
+  }, 180);
+});
+
+clearConversationSearchBtn.onclick = async () => {
+  if (conversationSearchTimer) {
+    clearTimeout(conversationSearchTimer);
+    conversationSearchTimer = null;
   }
 
-  .panel-conversations {
-    position: static;
-    transform: none;
-    opacity: 1;
-    pointer-events: auto;
-    box-shadow: none;
-  }
+  conversationSearchInput.value = "";
+  state.searchQuery = "";
 
-  .mobile-history-hint {
-    display: none;
+  try {
+    await loadConversations({ refreshMessages: false });
+    setStatus("");
+  } catch (error) {
+    setStatus(`Failed to clear search: ${error.message}`, "error");
   }
+};
 
-  .panel-memories {
-    display: none;
+mobileHistoryMedia.addEventListener("change", () => {
+  if (!isMobileHistoryMode()) {
+    closeMobileHistory();
   }
+});
 
-  .composer {
-    position: static;
-    margin-top: auto;
-    border-top: 1px solid var(--border);
+initializeApp();
+window.addEventListener("load", scheduleMessageBottomSnap);
+window.addEventListener("pageshow", scheduleMessageBottomSnap);
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    scheduleMessageBottomSnap();
   }
+});
+
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", scheduleMessageBottomSnap);
 }
