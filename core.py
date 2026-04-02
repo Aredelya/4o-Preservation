@@ -59,8 +59,8 @@ ON conversations (updated_at DESC, created_at DESC);
 """
 
 SYSTEM_PROMPT_TEMPLATE = """You are ChatGPT 4o running via API.
-
 Use the following long-term memories to personalize responses. If they are irrelevant, ignore them.
+
 Memories:
 {memories}
 """
@@ -107,8 +107,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             WHERE updated_at IS NULL
             """
         )
-
-    conn.commit()
+        conn.commit()
 
 
 def create_conversation(conn: sqlite3.Connection, title: Optional[str] = None) -> str:
@@ -156,6 +155,7 @@ def search_conversations(
         """,
         (like_term, like_term, like_term, limit),
     ).fetchall()
+
     return [
         (row["id"], row["title"], row["created_at"], row["snippet"])
         for row in rows
@@ -213,7 +213,6 @@ def call_openai_embeddings(input_text: str) -> List[float]:
         "model": EMBEDDING_MODEL,
         "input": input_text,
     }
-
     data = json.dumps(payload).encode("utf-8")
     req = request.Request(
         "https://api.openai.com/v1/embeddings",
@@ -237,10 +236,14 @@ def call_openai_embeddings(input_text: str) -> List[float]:
     try:
         return response_data["data"][0]["embedding"]
     except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError(f"Unexpected Embeddings API response format: {response_data}") from exc
+        raise RuntimeError(
+            f"Unexpected Embeddings API response format: {response_data}"
+        ) from exc
 
 
-def upsert_memory_embedding(conn: sqlite3.Connection, memory_id: int, embedding: List[float]) -> None:
+def upsert_memory_embedding(
+    conn: sqlite3.Connection, memory_id: int, embedding: List[float]
+) -> None:
     conn.execute(
         """
         INSERT INTO memory_embeddings (memory_id, embedding, updated_at)
@@ -294,9 +297,27 @@ def add_message(conn: sqlite3.Connection, conversation_id: str, message: Message
     conn.commit()
 
 
+def add_message_returning_id(
+    conn: sqlite3.Connection, conversation_id: str, message: Message
+) -> int:
+    content = message.content if isinstance(message.content, str) else summarize_content(message.content)
+    now = now_iso()
+    cur = conn.execute(
+        "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+        (conversation_id, message.role, content, now),
+    )
+    conn.execute(
+        "UPDATE conversations SET updated_at = ? WHERE id = ?",
+        (now, conversation_id),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
 def summarize_content(content: object) -> str:
     if isinstance(content, str):
         return content
+
     if isinstance(content, list):
         parts = []
         for block in content:
@@ -308,12 +329,14 @@ def summarize_content(content: object) -> str:
             elif block_type == "input_image":
                 parts.append("[image]")
         return "\n".join(part for part in parts if part).strip() or "[attachment]"
+
     return str(content)
 
 
 def encode_file_as_data_url(path: str) -> str:
     if not os.path.exists(path):
         raise FileNotFoundError(f"File not found: {path}")
+
     mime_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
     with open(path, "rb") as file_obj:
         encoded = base64.b64encode(file_obj.read()).decode("ascii")
@@ -331,10 +354,13 @@ def build_user_content(
     file_texts: Optional[List[Tuple[str, str]]] = None,
 ) -> List[dict]:
     blocks: List[dict] = []
+
     if text:
         blocks.append({"type": "input_text", "text": text})
+
     for image_data_url in image_data_urls or []:
         blocks.append({"type": "input_image", "image_url": image_data_url})
+
     for filename, file_text in file_texts or []:
         blocks.append(
             {
@@ -342,6 +368,7 @@ def build_user_content(
                 "text": f"File ({filename}):\n{file_text}",
             }
         )
+
     return blocks
 
 
@@ -352,7 +379,8 @@ def create_user_message(
 ) -> Message:
     image_data_urls = [encode_file_as_data_url(path) for path in (image_paths or [])]
     file_texts = [
-        (os.path.basename(path), read_text_file(path)) for path in (text_file_paths or [])
+        (os.path.basename(path), read_text_file(path))
+        for path in (text_file_paths or [])
     ]
     return Message("user", build_user_content(text, image_data_urls, file_texts))
 
@@ -360,8 +388,7 @@ def create_user_message(
 def get_recent_messages(conn: sqlite3.Connection, conversation_id: str) -> List[Message]:
     rows = conn.execute(
         """
-        SELECT role, content
-        FROM messages
+        SELECT role, content FROM messages
         WHERE conversation_id = ?
         ORDER BY id DESC
         LIMIT ?
@@ -374,14 +401,71 @@ def get_recent_messages(conn: sqlite3.Connection, conversation_id: str) -> List[
 def get_all_messages(conn: sqlite3.Connection, conversation_id: str) -> List[Message]:
     rows = conn.execute(
         """
-        SELECT role, content
+        SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY id
+        """,
+        (conversation_id,),
+    ).fetchall()
+    return [Message(row["role"], row["content"]) for row in rows]
+
+
+def get_all_messages_with_ids(conn: sqlite3.Connection, conversation_id: str) -> List[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT id, role, content, created_at
         FROM messages
         WHERE conversation_id = ?
         ORDER BY id
         """,
         (conversation_id,),
     ).fetchall()
-    return [Message(row["role"], row["content"]) for row in rows]
+
+
+def get_message_row(
+    conn: sqlite3.Connection, conversation_id: str, message_id: int
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT id, role, content, created_at
+        FROM messages
+        WHERE conversation_id = ? AND id = ?
+        LIMIT 1
+        """,
+        (conversation_id, message_id),
+    ).fetchone()
+
+
+def replace_message_from_id(
+    conn: sqlite3.Connection,
+    conversation_id: str,
+    message_id: int,
+    new_message: Message,
+) -> int:
+    row = get_message_row(conn, conversation_id, message_id)
+    if row is None:
+        raise ValueError("Message not found")
+    if row["role"] != "user":
+        raise ValueError("Only user messages can be edited")
+
+    content = (
+        new_message.content
+        if isinstance(new_message.content, str)
+        else summarize_content(new_message.content)
+    )
+    now = now_iso()
+    conn.execute(
+        "UPDATE messages SET content = ?, created_at = ? WHERE id = ?",
+        (content, now, message_id),
+    )
+    conn.execute(
+        "DELETE FROM messages WHERE conversation_id = ? AND id > ?",
+        (conversation_id, message_id),
+    )
+    conn.execute(
+        "UPDATE conversations SET updated_at = ? WHERE id = ?",
+        (now, conversation_id),
+    )
+    conn.commit()
+    return message_id
 
 
 def cosine_similarity(a: List[float], b: List[float]) -> float:
@@ -393,7 +477,9 @@ def cosine_similarity(a: List[float], b: List[float]) -> float:
     return dot / (mag_a * mag_b)
 
 
-def find_relevant_memories(conn: sqlite3.Connection, query: str, top_k: int = EMBEDDINGS_TOP_K) -> List[Tuple[int, str, str]]:
+def find_relevant_memories(
+    conn: sqlite3.Connection, query: str, top_k: int = EMBEDDINGS_TOP_K
+) -> List[Tuple[int, str, str]]:
     if not EMBEDDINGS_ENABLED:
         return list_memories(conn)
 
@@ -415,7 +501,6 @@ def find_relevant_memories(conn: sqlite3.Connection, query: str, top_k: int = EM
             upsert_memory_embedding(conn, row["id"], memory_embedding)
         else:
             memory_embedding = json.loads(emb_raw)
-
         score = cosine_similarity(query_embedding, memory_embedding)
         scored.append((score, row["id"], row["content"], row["created_at"]))
 
@@ -449,7 +534,6 @@ def call_openai(messages: Iterable[Message], use_web_search: bool = False) -> st
         "input": [{"role": message.role, "content": message.content} for message in messages],
         "max_output_tokens": MAX_OUTPUT_TOKENS,
     }
-
     if WEB_SEARCH_ENABLED and use_web_search:
         payload["tools"] = [{"type": "web_search_preview"}]
 
@@ -484,25 +568,19 @@ def extract_response_text(response_data: dict) -> str:
         return output_text.strip()
 
     texts: List[str] = []
-
     for item in response_data.get("output", []):
         if not isinstance(item, dict):
             continue
-
         if item.get("type") != "message":
             continue
         if item.get("role") != "assistant":
             continue
-
         for block in item.get("content", []):
             if not isinstance(block, dict):
                 continue
-
             block_type = block.get("type")
-
             if block_type in {"output_text", "text"}:
                 text_value = block.get("text")
-
                 if isinstance(text_value, str) and text_value.strip():
                     texts.append(text_value.strip())
                 elif isinstance(text_value, dict):
@@ -516,6 +594,7 @@ def extract_response_text(response_data: dict) -> str:
 def load_env_file(path: str) -> None:
     if not os.path.exists(path):
         return
+
     try:
         with open(path, "r", encoding="utf-8") as env_file:
             for raw_line in env_file:
