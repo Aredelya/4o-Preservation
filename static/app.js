@@ -4,6 +4,7 @@ const state = {
   memories: [],
   searchQuery: "",
   isSending: false,
+  editingMessageId: null,
 };
 
 let conversationSearchTimer = null;
@@ -27,6 +28,11 @@ const clearConversationSearchBtn = document.getElementById("clearConversationSea
 const statusBanner = document.getElementById("statusBanner");
 const historyToggleBtn = document.getElementById("historyToggle");
 const closeHistoryBtn = document.getElementById("closeHistory");
+
+const setEditingState = (messageId = null) => {
+  state.editingMessageId = messageId;
+  sendMessageBtn.textContent = messageId ? "Save & resend" : "Send";
+};
 
 const mobileHistoryMedia = window.matchMedia("(max-width: 1100px) and (orientation: portrait)");
 
@@ -93,7 +99,32 @@ const setComposerBusy = (busy) => {
   messageInput.disabled = busy;
   fileInput.disabled = busy;
   sendMessageBtn.disabled = busy;
-  sendMessageBtn.textContent = busy ? "Sending..." : "Send";
+  sendMessageBtn.textContent = busy
+    ? (state.editingMessageId ? "Saving..." : "Sending...")
+    : (state.editingMessageId ? "Save & resend" : "Send");
+};
+
+const clearDraftAttachments = () => {
+  fileInput.value = "";
+};
+
+const startEditingMessage = (message) => {
+  if (!message || message.role !== "user") return;
+
+  state.editingMessageId = message.id;
+  messageInput.value = message.content || "";
+  clearDraftAttachments();
+  setEditingState(message.id);
+  messageInput.focus();
+  messageInput.setSelectionRange(messageInput.value.length, messageInput.value.length);
+  setStatus("Editing message. Everything after it will be replaced when you resend.");
+};
+
+const cancelEditingMessage = () => {
+  setEditingState(null);
+  messageInput.value = "";
+  clearDraftAttachments();
+  setStatus("", "");
 };
 
 const createBubble = ({ role, content, extraClass = "", id = "" }) => {
@@ -108,6 +139,35 @@ const createBubble = ({ role, content, extraClass = "", id = "" }) => {
   return bubble;
 };
 
+const createMessageElement = (message) => {
+  const wrap = document.createElement("div");
+  wrap.className = `message-row ${message.role}`;
+
+  const bubble = createBubble({
+    role: message.role,
+    content: message.content,
+    id: message.id ? String(message.id) : "",
+  });
+
+  wrap.appendChild(bubble);
+
+  if (message.role === "user" && message.id) {
+    const actions = document.createElement("div");
+    actions.className = "message-actions";
+
+    const editButton = document.createElement("button");
+    editButton.type = "button";
+    editButton.className = "secondary message-action-button";
+    editButton.textContent = "Edit";
+    editButton.onclick = () => startEditingMessage(message);
+
+    actions.appendChild(editButton);
+    wrap.appendChild(actions);
+  }
+
+  return wrap;
+};
+
 const appendMessageBubble = ({ role, content, extraClass = "", id = "" }) => {
   const bubble = createBubble({ role, content, extraClass, id });
   messageList.appendChild(bubble);
@@ -119,12 +179,7 @@ const renderMessages = (messages = [], autoSnap = true) => {
   messageList.innerHTML = "";
 
   for (const message of messages) {
-    messageList.appendChild(
-      createBubble({
-        role: message.role,
-        content: message.content,
-      })
-    );
+    messageList.appendChild(createMessageElement(message));
   }
 
   if (autoSnap) {
@@ -251,6 +306,14 @@ const loadMessages = async (conversationId) => {
   if (conversationId !== state.activeConversation) return;
 
   conversationTitle.textContent = data.title || "Chat";
+
+  if (
+    state.editingMessageId &&
+    !data.messages.some((message) => message.id === state.editingMessageId)
+  ) {
+    setEditingState(null);
+  }
+
   renderMessages(data.messages);
 };
 
@@ -258,6 +321,7 @@ const loadConversations = async ({ refreshMessages = true } = {}) => {
   const requestId = ++latestConversationsRequest;
   const query = state.searchQuery.trim();
   const previousActiveConversation = state.activeConversation;
+
   const searchSuffix = query ? `?q=${encodeURIComponent(query)}` : "";
   const data = await api(`/api/conversations${searchSuffix}`);
 
@@ -302,6 +366,8 @@ const selectConversation = async (conversationId) => {
   if (state.isSending) return;
 
   state.activeConversation = conversationId;
+  setEditingState(null);
+  clearDraftAttachments();
   renderConversations();
   await loadMessages(conversationId);
   closeMobileHistory();
@@ -311,6 +377,7 @@ const createConversation = async () => {
   if (state.isSending) return;
 
   const data = await api("/api/conversations", { method: "POST" });
+  setEditingState(null);
   await loadConversations({ refreshMessages: false });
   await selectConversation(data.id);
   closeMobileHistory();
@@ -403,6 +470,7 @@ const sendMessage = async () => {
     }
 
     const attachments = await readAttachments(files);
+    const isEditing = !!state.editingMessageId;
 
     const optimisticTextParts = [];
     if (content) {
@@ -414,10 +482,12 @@ const sendMessage = async () => {
       optimisticTextParts.push(attachmentSummary);
     }
 
-    appendMessageBubble({
-      role: "user",
-      content: optimisticTextParts.join("\n\n") || "(Attachment upload)",
-    });
+    if (!isEditing) {
+      appendMessageBubble({
+        role: "user",
+        content: optimisticTextParts.join("\n\n") || "(Attachment upload)",
+      });
+    }
 
     pendingBubble = appendMessageBubble({
       role: "assistant",
@@ -426,16 +496,23 @@ const sendMessage = async () => {
       id: `pending-${Date.now()}`,
     });
 
+    const requestPath = isEditing ? "/api/edit" : "/api/send";
+    const requestBody = {
+      conversation_id: conversationId,
+      content,
+      attachments,
+    };
+
+    if (isEditing) {
+      requestBody.message_id = state.editingMessageId;
+    }
+
     messageInput.value = "";
     fileInput.value = "";
 
-    const result = await api("/api/send", {
+    const result = await api(requestPath, {
       method: "POST",
-      body: JSON.stringify({
-        conversation_id: conversationId,
-        content,
-        attachments,
-      }),
+      body: JSON.stringify(requestBody),
     });
 
     if (pendingBubble) {
@@ -444,7 +521,10 @@ const sendMessage = async () => {
       pendingBubble.classList.remove("error");
     }
 
+    setEditingState(null);
     await loadConversations({ refreshMessages: false });
+    await loadMessages(conversationId);
+    setStatus(isEditing ? "Message updated and response regenerated." : "", "", isEditing ? 2500 : 0);
   } catch (error) {
     if (pendingBubble) {
       pendingBubble.textContent = `Failed to send: ${error.message}`;
@@ -566,6 +646,12 @@ if (closeHistoryBtn) {
 }
 
 messageInput.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.editingMessageId) {
+    event.preventDefault();
+    cancelEditingMessage();
+    return;
+  }
+
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
     void sendMessage();
@@ -618,14 +704,3 @@ mobileHistoryMedia.addEventListener("change", () => {
 
 initializeApp();
 window.addEventListener("load", scheduleMessageBottomSnap);
-window.addEventListener("pageshow", scheduleMessageBottomSnap);
-
-document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) {
-    scheduleMessageBottomSnap();
-  }
-});
-
-if (window.visualViewport) {
-  window.visualViewport.addEventListener("resize", scheduleMessageBottomSnap);
-}
