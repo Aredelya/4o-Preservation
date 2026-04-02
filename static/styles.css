@@ -353,6 +353,30 @@ h2 {
   background: var(--danger-bg);
 }
 
+.message-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.message-row.user {
+  align-items: flex-end;
+}
+
+.message-row.assistant {
+  align-items: flex-start;
+}
+
+.message-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.message-action-button {
+  padding: 7px 10px;
+  font-size: 0.85rem;
+}
+
 .composer {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
