@@ -12,6 +12,7 @@ from core import (
     Message,
     add_memory,
     add_message,
+    add_message_returning_id,
     build_system_prompt,
     build_user_content,
     call_openai,
@@ -21,13 +22,15 @@ from core import (
     create_conversation,
     delete_conversation,
     delete_memory,
-    get_all_messages,
+    get_all_messages_with_ids,
     get_conversation_title,
+    get_message_row,
     get_recent_messages,
     init_db,
     list_conversations,
     list_memories,
     load_env_file,
+    replace_message_from_id,
     search_conversations,
     update_conversation_title,
 )
@@ -197,8 +200,13 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             title = get_conversation_title(conn, conversation_id)
             messages = [
-                {"role": msg.role, "content": msg.content}
-                for msg in get_all_messages(conn, conversation_id)
+                {
+                    "id": row["id"],
+                    "role": row["role"],
+                    "content": row["content"],
+                    "created_at": row["created_at"],
+                }
+                for row in get_all_messages_with_ids(conn, conversation_id)
             ]
 
         return {"title": title, "messages": messages}
@@ -229,18 +237,18 @@ class ChatHandler(BaseHTTPRequestHandler):
     def _handle_update_title(self, payload: dict) -> dict:
         conversation_id = payload.get("conversation_id")
         title = (payload.get("title") or "").strip()
-    
+
         if not conversation_id:
             raise ApiError("Missing conversation_id")
         if not title:
             raise ApiError("Missing title")
-    
+
         with connect_db() as conn:
             if not conversation_exists(conn, conversation_id):
                 raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
-    
+
             updated = update_conversation_title(conn, conversation_id, title)
-    
+
         return {"updated": updated}
 
     def _handle_send_message(self, payload: dict) -> dict:
@@ -290,11 +298,11 @@ class ChatHandler(BaseHTTPRequestHandler):
         with connect_db() as conn:
             if not conversation_exists(conn, conversation_id):
                 raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
-        
+
             history = get_recent_messages(conn, conversation_id)
             system_prompt = build_system_prompt(conn, content or "Attachment upload")
             messages = [Message("system", system_prompt), *history, user_message]
-        
+
             add_message(conn, conversation_id, user_message)
 
             try:
@@ -311,6 +319,96 @@ class ChatHandler(BaseHTTPRequestHandler):
         return {
             "status": "ok",
             "assistant_message": {
+                "role": "assistant",
+                "content": response_text,
+            },
+        }
+
+    def _handle_edit_message(self, payload: dict) -> dict:
+        conversation_id = payload.get("conversation_id")
+        content = (payload.get("content") or "").strip()
+        attachments = self._validate_attachments(payload.get("attachments") or [])
+
+        try:
+            message_id = int(payload.get("message_id"))
+        except (TypeError, ValueError) as exc:
+            raise ApiError("Invalid message_id") from exc
+
+        if not conversation_id:
+            raise ApiError("Missing conversation_id")
+        if not content and not attachments:
+            raise ApiError("Message content or attachments required")
+
+        use_web_search = False
+        if content.lower().startswith("/web "):
+            use_web_search = True
+            content = content[5:].strip()
+
+        image_data_urls = [
+            attachment["data_url"]
+            for attachment in attachments
+            if attachment["kind"] == "image"
+        ]
+        file_texts = [
+            (attachment["name"], attachment["text"])
+            for attachment in attachments
+            if attachment["kind"] == "text"
+        ]
+
+        user_content = build_user_content(content or None, image_data_urls, file_texts)
+        user_message = Message("user", user_content)
+
+        with connect_db() as conn:
+            if not conversation_exists(conn, conversation_id):
+                raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
+
+            existing_row = get_message_row(conn, conversation_id, message_id)
+            if existing_row is None:
+                raise ApiError("Message not found", HTTPStatus.NOT_FOUND)
+            if existing_row["role"] != "user":
+                raise ApiError("Only user messages can be edited")
+
+            history_rows = get_all_messages_with_ids(conn, conversation_id)
+            history = []
+            for row in history_rows:
+                if row["id"] >= message_id:
+                    break
+                history.append(Message(row["role"], row["content"]))
+
+            system_prompt = build_system_prompt(conn, content or "Attachment upload")
+            messages = [Message("system", system_prompt), *history, user_message]
+
+            try:
+                replace_message_from_id(conn, conversation_id, message_id, user_message)
+                response_text = call_openai(messages, use_web_search=use_web_search)
+            except ValueError as exc:
+                raise ApiError(str(exc), HTTPStatus.BAD_REQUEST) from exc
+            except Exception as exc:
+                logger.exception(
+                    "Model call failed while editing message %s in conversation %s",
+                    message_id,
+                    conversation_id,
+                )
+                raise ApiError(
+                    "Assistant request failed",
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                ) from exc
+
+            assistant_id = add_message_returning_id(
+                conn,
+                conversation_id,
+                Message("assistant", response_text),
+            )
+
+        return {
+            "status": "ok",
+            "edited_message": {
+                "id": message_id,
+                "role": "user",
+                "content": user_message.content if isinstance(user_message.content, str) else "",
+            },
+            "assistant_message": {
+                "id": assistant_id,
                 "role": "assistant",
                 "content": response_text,
             },
@@ -391,6 +489,11 @@ class ChatHandler(BaseHTTPRequestHandler):
             if parts == ["api", "send"]:
                 payload = self._read_json()
                 self._send_json(self._handle_send_message(payload))
+                return
+
+            if parts == ["api", "edit"]:
+                payload = self._read_json()
+                self._send_json(self._handle_edit_message(payload))
                 return
 
             if parts == ["api", "memories"]:
