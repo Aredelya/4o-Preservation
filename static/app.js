@@ -53,8 +53,14 @@ const openMobileHistory = () => setMobileHistoryOpen(true);
 const api = async (path, options = {}) => {
   const response = await fetch(path, {
     headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
     ...options,
   });
+
+  if (response.status === 401) {
+    window.location.href = "/login";
+    throw new Error("Authentication required");
+  }
 
   const contentType = response.headers.get("Content-Type") || "";
   const isJson = contentType.includes("application/json");
@@ -67,7 +73,6 @@ const api = async (path, options = {}) => {
         : typeof body === "string" && body.trim()
           ? body
           : "Request failed";
-
     throw new Error(message);
   }
 
