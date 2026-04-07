@@ -28,6 +28,7 @@ const clearConversationSearchBtn = document.getElementById("clearConversationSea
 const statusBanner = document.getElementById("statusBanner");
 const historyToggleBtn = document.getElementById("historyToggle");
 const closeHistoryBtn = document.getElementById("closeHistory");
+const logoutButton = document.getElementById("logoutButton");
 
 const setEditingState = (messageId = null) => {
   state.editingMessageId = messageId;
