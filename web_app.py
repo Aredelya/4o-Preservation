@@ -41,6 +41,8 @@ from core import (
     update_conversation_title,
 )
 
+load_env_file(ENV_PATH)
+
 HOST = os.environ.get("CHATBOT_WEB_HOST", "0.0.0.0")
 PORT = int(os.environ.get("CHATBOT_WEB_PORT", "8000"))
 
@@ -54,7 +56,7 @@ MAX_TEXT_ATTACHMENT_CHARS = 200_000
 WEB_PASSWORD = os.environ.get("CHATBOT_WEB_PASSWORD", "").strip()
 WEB_PASSWORD_HASH = os.environ.get("CHATBOT_WEB_PASSWORD_HASH", "").strip().lower()
 WEB_SESSION_SECRET = os.environ.get("CHATBOT_WEB_SESSION_SECRET", "").strip()
-WEB_SESSION_TTL = int(os.environ.get("CHATBOT_WEB_SESSION_TTL", "1209600"))  # 14 days
+WEB_SESSION_TTL = int(os.environ.get("CHATBOT_WEB_SESSION_TTL", "1209600"))
 WEB_COOKIE_NAME = os.environ.get("CHATBOT_WEB_COOKIE_NAME", "chatbot_session")
 WEB_COOKIE_SECURE = os.environ.get("CHATBOT_WEB_COOKIE_SECURE", "0").strip() == "1"
 
