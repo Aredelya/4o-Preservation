@@ -1,8 +1,14 @@
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import mimetypes
 import os
+import secrets
+import time
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -45,7 +51,74 @@ MAX_BODY_SIZE = 5 * 1024 * 1024
 MAX_ATTACHMENTS = 8
 MAX_TEXT_ATTACHMENT_CHARS = 200_000
 
+WEB_PASSWORD = os.environ.get("CHATBOT_WEB_PASSWORD", "").strip()
+WEB_PASSWORD_HASH = os.environ.get("CHATBOT_WEB_PASSWORD_HASH", "").strip().lower()
+WEB_SESSION_SECRET = os.environ.get("CHATBOT_WEB_SESSION_SECRET", "").strip()
+WEB_SESSION_TTL = int(os.environ.get("CHATBOT_WEB_SESSION_TTL", "1209600"))  # 14 days
+WEB_COOKIE_NAME = os.environ.get("CHATBOT_WEB_COOKIE_NAME", "chatbot_session")
+WEB_COOKIE_SECURE = os.environ.get("CHATBOT_WEB_COOKIE_SECURE", "0").strip() == "1"
+
 logger = logging.getLogger(__name__)
+
+
+def auth_enabled() -> bool:
+    return bool(WEB_PASSWORD or WEB_PASSWORD_HASH)
+
+
+def sha256_hex(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def password_matches(candidate: str) -> bool:
+    if not auth_enabled():
+        return True
+
+    candidate_hash = sha256_hex(candidate)
+
+    if WEB_PASSWORD_HASH:
+        return hmac.compare_digest(candidate_hash, WEB_PASSWORD_HASH)
+
+    return hmac.compare_digest(candidate_hash, sha256_hex(WEB_PASSWORD))
+
+
+def get_session_secret() -> str:
+    # If not explicitly set, generate one for this process.
+    # Sessions will be invalidated on restart unless CHATBOT_WEB_SESSION_SECRET is set.
+    if WEB_SESSION_SECRET:
+        return WEB_SESSION_SECRET
+    return _RUNTIME_SESSION_SECRET
+
+
+_RUNTIME_SESSION_SECRET = secrets.token_hex(32)
+
+
+def make_session_token(expires_at: int) -> str:
+    payload = str(expires_at).encode("utf-8")
+    signature = hmac.new(
+        get_session_secret().encode("utf-8"),
+        payload,
+        hashlib.sha256,
+    ).digest()
+    signature_b64 = base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+    return f"{expires_at}.{signature_b64}"
+
+
+def verify_session_token(token: str) -> bool:
+    if not token or "." not in token:
+        return False
+
+    expires_str, signature_b64 = token.split(".", 1)
+
+    try:
+        expires_at = int(expires_str)
+    except ValueError:
+        return False
+
+    if expires_at < int(time.time()):
+        return False
+
+    expected = make_session_token(expires_at)
+    return hmac.compare_digest(token, expected)
 
 
 class ApiError(Exception):
@@ -56,12 +129,12 @@ class ApiError(Exception):
 
 
 class ChatHandler(BaseHTTPRequestHandler):
-    server_version = "ChatServer/1.0"
+    server_version = "ChatServer/1.1"
 
     def log_message(self, format: str, *args) -> None:
         logger.info("%s - %s", self.address_string(), format % args)
 
-    def _send_bytes(self, payload: bytes, content_type: str, status: HTTPStatus) -> None:
+    def _send_bytes(self, payload: bytes, content_type: str, status: HTTPStatus, extra_headers=None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
@@ -77,16 +150,27 @@ class ChatHandler(BaseHTTPRequestHandler):
             "base-uri 'none'; "
             "frame-ancestors 'none'",
         )
+
+        if extra_headers:
+            for key, value in extra_headers.items():
+                self.send_header(key, value)
+
         self.end_headers()
         self.wfile.write(payload)
 
-    def _send_json(self, data: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
+    def _send_json(self, data: dict, status: HTTPStatus = HTTPStatus.OK, extra_headers=None) -> None:
         payload = json.dumps(data).encode("utf-8")
-        self._send_bytes(payload, "application/json; charset=utf-8", status)
+        self._send_bytes(payload, "application/json; charset=utf-8", status, extra_headers=extra_headers)
 
-    def _send_text(self, text: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+    def _send_text(self, text: str, status: HTTPStatus = HTTPStatus.OK, extra_headers=None) -> None:
         payload = text.encode("utf-8")
-        self._send_bytes(payload, "text/plain; charset=utf-8", status)
+        self._send_bytes(payload, "text/plain; charset=utf-8", status, extra_headers=extra_headers)
+
+    def _send_redirect(self, location: str, extra_headers=None) -> None:
+        headers = {"Location": location}
+        if extra_headers:
+            headers.update(extra_headers)
+        self._send_bytes(b"", "text/plain; charset=utf-8", HTTPStatus.SEE_OTHER, extra_headers=headers)
 
     def _send_api_error(self, message: str, status: HTTPStatus) -> None:
         self._send_json({"error": message}, status)
@@ -130,6 +214,58 @@ class ChatHandler(BaseHTTPRequestHandler):
             raise ApiError("Request body must be UTF-8", HTTPStatus.BAD_REQUEST) from exc
         except json.JSONDecodeError as exc:
             raise ApiError("Malformed JSON", HTTPStatus.BAD_REQUEST) from exc
+
+    def _build_cookie_header(self, name: str, value: str, max_age=None, expires=None) -> str:
+        cookie = SimpleCookie()
+        cookie[name] = value
+        morsel = cookie[name]
+        morsel["path"] = "/"
+        morsel["httponly"] = True
+        morsel["samesite"] = "Lax"
+
+        if WEB_COOKIE_SECURE:
+            morsel["secure"] = True
+
+        if max_age is not None:
+            morsel["max-age"] = str(max_age)
+
+        if expires is not None:
+            morsel["expires"] = expires
+
+        return morsel.OutputString()
+
+    def _get_cookie(self, name: str) -> str:
+        raw_cookie = self.headers.get("Cookie", "")
+        if not raw_cookie:
+            return ""
+
+        cookie = SimpleCookie()
+        try:
+            cookie.load(raw_cookie)
+        except Exception:
+            return ""
+
+        morsel = cookie.get(name)
+        return morsel.value if morsel else ""
+
+    def _is_authenticated(self) -> bool:
+        if not auth_enabled():
+            return True
+
+        token = self._get_cookie(WEB_COOKIE_NAME)
+        return verify_session_token(token)
+
+    def _require_auth(self) -> bool:
+        if self._is_authenticated():
+            return True
+
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/"):
+            self._send_api_error("Authentication required", HTTPStatus.UNAUTHORIZED)
+            return False
+
+        self._send_redirect("/login")
+        return False
 
     def _validate_attachments(self, attachments: list[dict]) -> list[dict]:
         if not isinstance(attachments, list):
@@ -262,7 +398,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             raise ApiError("Message content or attachments required")
 
         if content.lower().startswith("/title"):
-            new_title = content[len("/title") :].strip()
+            new_title = content[len("/title"):].strip()
             if not new_title:
                 raise ApiError("Missing title text")
 
@@ -440,6 +576,35 @@ class ChatHandler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             parts = self._path_parts()
 
+            if parsed.path == "/login":
+                if not auth_enabled() or self._is_authenticated():
+                    self._send_redirect("/")
+                    return
+
+                self._send_file(STATIC_DIR / "login.html")
+                return
+
+            if parsed.path == "/logout":
+                self._send_redirect(
+                    "/login",
+                    extra_headers={
+                        "Set-Cookie": self._build_cookie_header(
+                            WEB_COOKIE_NAME,
+                            "",
+                            max_age=0,
+                            expires="Thu, 01 Jan 1970 00:00:00 GMT",
+                        )
+                    },
+                )
+                return
+
+            if parsed.path == "/static/styles.css":
+                self._send_file(STATIC_DIR / "styles.css")
+                return
+
+            if not self._require_auth():
+                return
+
             if parsed.path == "/":
                 self._send_file(STATIC_DIR / "index.html")
                 return
@@ -482,6 +647,35 @@ class ChatHandler(BaseHTTPRequestHandler):
         try:
             parts = self._path_parts()
 
+            if parts == ["login"]:
+                payload = self._read_json()
+                password = str(payload.get("password") or "")
+
+                if not auth_enabled():
+                    self._send_json({"status": "ok", "auth_enabled": False})
+                    return
+
+                if not password_matches(password):
+                    raise ApiError("Invalid password", HTTPStatus.UNAUTHORIZED)
+
+                expires_at = int(time.time()) + WEB_SESSION_TTL
+                session_token = make_session_token(expires_at)
+
+                self._send_json(
+                    {"status": "ok"},
+                    extra_headers={
+                        "Set-Cookie": self._build_cookie_header(
+                            WEB_COOKIE_NAME,
+                            session_token,
+                            max_age=WEB_SESSION_TTL,
+                        )
+                    },
+                )
+                return
+
+            if not self._require_auth():
+                return
+
             if parts == ["api", "conversations"]:
                 self._send_json(self._handle_create_conversation(), HTTPStatus.CREATED)
                 return
@@ -518,6 +712,9 @@ class ChatHandler(BaseHTTPRequestHandler):
         try:
             parts = self._path_parts()
 
+            if not self._require_auth():
+                return
+
             if len(parts) == 3 and parts[:2] == ["api", "conversations"]:
                 self._send_json(self._handle_delete_conversation(parts[2]))
                 return
@@ -552,6 +749,11 @@ def main() -> None:
 
     with connect_db() as conn:
         init_db(conn)
+
+    if auth_enabled() and not WEB_SESSION_SECRET:
+        logger.warning(
+            "CHATBOT_WEB_SESSION_SECRET is not set; existing sessions will reset on every restart."
+        )
 
     server = ThreadingHTTPServer((HOST, PORT), ChatHandler)
     logger.info("Web app running on http://%s:%s", HOST, PORT)
