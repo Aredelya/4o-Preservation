@@ -651,6 +651,12 @@ if (closeHistoryBtn) {
   };
 }
 
+if (logoutButton) {
+  logoutButton.onclick = () => {
+    window.location.href = "/logout";
+  };
+}
+
 messageInput.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && state.editingMessageId) {
     event.preventDefault();
