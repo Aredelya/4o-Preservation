@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Login · 4o Preservation</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <style>
+      body {
+        display: grid;
+        place-items: center;
+        min-height: 100vh;
+      }
+
+      .login-card {
+        width: min(420px, calc(100vw - 32px));
+        background: rgba(255, 255, 255, 0.96);
+        border-radius: 18px;
+        padding: 24px;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.15);
+      }
+
+      .login-card h1 {
+        margin: 0 0 8px;
+      }
+
+      .login-card p {
+        margin: 0 0 18px;
+      }
+
+      .login-card input,
+      .login-card button {
+        width: 100%;
+      }
+
+      .login-card button {
+        margin-top: 12px;
+      }
+
+      .error-text {
+        min-height: 1.25rem;
+        margin-top: 10px;
+        color: #b42318;
+      }
+    </style>
+  </head>
+  <body>
+    <section class="login-card" aria-label="Login form">
+      <h1>4o Preservation</h1>
+      <p class="muted">Enter the password to open the web app</p>
+
+      <form id="loginForm">
+        <input
+          id="passwordInput"
+          type="password"
+          placeholder="Password"
+          autocomplete="current-password"
+          aria-label="Password"
+          required
+        />
+        <button class="primary" id="loginButton" type="submit">Log in</button>
+      </form>
+
+      <div id="errorText" class="error-text" aria-live="polite"></div>
+    </section>
+
+    <script>
+      const form = document.getElementById("loginForm");
+      const passwordInput = document.getElementById("passwordInput");
+      const loginButton = document.getElementById("loginButton");
+      const errorText = document.getElementById("errorText");
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+
+        const password = passwordInput.value.trim();
+        if (!password) {
+          errorText.textContent = "Enter a password";
+          return;
+        }
+
+        loginButton.disabled = true;
+        loginButton.textContent = "Signing in...";
+        errorText.textContent = "";
+
+        try {
+          const response = await fetch("/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ password }),
+          });
+
+          const contentType = response.headers.get("Content-Type") || "";
+          const isJson = contentType.includes("application/json");
+          const body = isJson ? await response.json() : await response.text();
+
+          if (!response.ok) {
+            const message =
+              isJson && body && body.error
+                ? body.error
+                : "Login failed";
+            throw new Error(message);
+          }
+
+          window.location.href = "/";
+        } catch (error) {
+          errorText.textContent = error.message || "Login failed";
+          passwordInput.select();
+        } finally {
+          loginButton.disabled = false;
+          loginButton.textContent = "Log in";
+        }
+      });
+
+      passwordInput.focus();
+    </script>
+  </body>
+</html>
