@@ -144,13 +144,13 @@ def send_user_message(
     conversation_id: str,
     user_message: Message,
     query: str,
-    use_web_search: bool = False,
+    web_search_mode: str = "off",
 ) -> None:
     history = get_recent_messages(conn, conversation_id)
     system_prompt = build_system_prompt(conn, query)
     messages = [Message("system", system_prompt), *history, user_message]
 
-    response_text = call_openai(messages, use_web_search=use_web_search)
+    response_text = call_openai(messages, web_search_mode=web_search_mode)
     add_message(conn, conversation_id, user_message)
     add_message(conn, conversation_id, Message("assistant", response_text))
     print(f"\nAssistant: {response_text}")
@@ -279,7 +279,7 @@ def main() -> int:
                     continue
                 try:
                     user_message = create_user_message(text=f"Use web search and answer with sources: {query}")
-                    send_user_message(conn, conversation_id, user_message, query, use_web_search=True)
+                    send_user_message(conn, conversation_id, user_message, query, web_search_mode="force")
                 except Exception as exc:
                     print(f"Error: {exc}")
                 continue
@@ -317,7 +317,7 @@ def main() -> int:
 
         user_message = create_user_message(text=user_input)
         try:
-            send_user_message(conn, conversation_id, user_message, user_input)
+            send_user_message(conn, conversation_id, user_message, user_input, web_search_mode="auto")
         except RuntimeError as exc:
             print(f"Error: {exc}")
             continue

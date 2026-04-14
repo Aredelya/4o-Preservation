@@ -19,6 +19,7 @@ const messageInput = document.getElementById("messageInput");
 const fileInput = document.getElementById("fileInput");
 const newConversationBtn = document.getElementById("newConversation");
 const sendMessageBtn = document.getElementById("sendMessage");
+const enableWebSearchInput = document.getElementById("enableWebSearch");
 const memoryInput = document.getElementById("memoryInput");
 const saveMemoryBtn = document.getElementById("saveMemory");
 const memoryList = document.getElementById("memoryList");
@@ -133,6 +134,116 @@ const cancelEditingMessage = () => {
   setStatus("", "");
 };
 
+const escapeHtml = (value = "") =>
+  String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+
+const renderMarkdown = (content = "") => {
+  if (!content) return "";
+
+  const lines = String(content).replace(/\r\n/g, "\n").split("\n");
+  const html = [];
+  let inCodeBlock = false;
+  let codeLang = "";
+  let codeFence = "";
+  let inList = false;
+
+  const closeListIfOpen = () => {
+    if (inList) {
+      html.push("</ul>");
+      inList = false;
+    }
+  };
+
+  const renderInline = (text) => {
+    let line = escapeHtml(text);
+    line = line.replace(
+      /!\[([^\]]*?)\]\((https?:\/\/[^\s)]+|data:image\/[a-zA-Z0-9.+-]+;base64,[a-zA-Z0-9+/=]+)\)/g,
+      '<img src="$2" alt="$1" loading="lazy" />',
+    );
+    line = line.replace(/`([^`]+?)`/g, "<code>$1</code>");
+    line = line.replace(/\*\*([^*]+?)\*\*/g, "<strong>$1</strong>");
+    line = line.replace(/\*([^*]+?)\*/g, "<em>$1</em>");
+    line = line.replace(
+      /\[([^\]]+?)\]\((https?:\/\/[^\s)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>',
+    );
+    return line;
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine ?? "";
+
+    const fenceMatch = line.match(/^\s{0,3}(```+|~~~+)\s*([^`]*)$/);
+    if (fenceMatch) {
+      closeListIfOpen();
+      if (!inCodeBlock) {
+        inCodeBlock = true;
+        codeFence = fenceMatch[1];
+        codeLang = (fenceMatch[2] || "").trim();
+        const classAttr = codeLang ? ` class="lang-${escapeHtml(codeLang)}"` : "";
+        html.push(`<pre><code${classAttr}>`);
+      } else if (fenceMatch[1][0] === codeFence[0] && fenceMatch[1].length >= codeFence.length) {
+        inCodeBlock = false;
+        codeFence = "";
+        codeLang = "";
+        html.push("</code></pre>");
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      html.push(`${escapeHtml(line)}\n`);
+      continue;
+    }
+
+    if (!line.trim()) {
+      closeListIfOpen();
+      html.push("<br>");
+      continue;
+    }
+
+    const listMatch = line.match(/^\s*[-*]\s+(.+)$/);
+    if (listMatch) {
+      if (!inList) {
+        html.push("<ul>");
+        inList = true;
+      }
+      html.push(`<li>${renderInline(listMatch[1])}</li>`);
+      continue;
+    }
+
+    closeListIfOpen();
+
+    if (line.startsWith(">")) {
+      html.push(`<blockquote>${renderInline(line.slice(1).trim())}</blockquote>`);
+      continue;
+    }
+
+    const headingMatch = line.match(/^(#{1,3})\s+(.+)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      html.push(`<h${level}>${renderInline(headingMatch[2])}</h${level}>`);
+      continue;
+    }
+
+    html.push(`<p>${renderInline(line)}</p>`);
+  }
+
+  closeListIfOpen();
+
+  if (inCodeBlock) {
+    codeFence = "";
+    html.push("</code></pre>");
+  }
+
+  return html.join("");
+};
+
 const createBubble = ({ role, content, extraClass = "", id = "" }) => {
   const bubble = document.createElement("div");
   bubble.className = `bubble ${role}${extraClass ? ` ${extraClass}` : ""}`;
@@ -141,7 +252,7 @@ const createBubble = ({ role, content, extraClass = "", id = "" }) => {
     bubble.dataset.id = id;
   }
 
-  bubble.textContent = content;
+  bubble.innerHTML = renderMarkdown(content);
   return bubble;
 };
 
@@ -507,6 +618,7 @@ const sendMessage = async () => {
       conversation_id: conversationId,
       content,
       attachments,
+      enable_web_search: !!enableWebSearchInput?.checked,
     };
 
     if (isEditing) {
@@ -522,7 +634,7 @@ const sendMessage = async () => {
     });
 
     if (pendingBubble) {
-      pendingBubble.textContent = result.assistant_message?.content || "(No response)";
+      pendingBubble.innerHTML = renderMarkdown(result.assistant_message?.content || "(No response)");
       pendingBubble.classList.remove("pending");
       pendingBubble.classList.remove("error");
     }

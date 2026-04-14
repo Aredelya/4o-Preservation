@@ -22,6 +22,7 @@ from core import (
     build_system_prompt,
     build_user_content,
     call_openai,
+    call_openai_image,
     clear_memories,
     connect_db,
     conversation_exists,
@@ -414,10 +415,44 @@ class ChatHandler(BaseHTTPRequestHandler):
                 "title": new_title,
             }
 
-        use_web_search = False
+        if content.lower().startswith("/image "):
+            image_prompt = content[7:].strip()
+            if not image_prompt:
+                raise ApiError("Missing image prompt")
+
+            with connect_db() as conn:
+                if not conversation_exists(conn, conversation_id):
+                    raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
+
+                user_message = Message("user", image_prompt)
+                add_message(conn, conversation_id, user_message)
+
+                try:
+                    image_url = call_openai_image(image_prompt)
+                except Exception as exc:
+                    logger.exception("Image generation failed for conversation %s", conversation_id)
+                    raise ApiError(
+                        "Image generation failed",
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                    ) from exc
+
+                assistant_text = f"Generated image:\n\n![Generated image]({image_url})"
+                add_message(conn, conversation_id, Message("assistant", assistant_text))
+
+            return {
+                "status": "ok",
+                "assistant_message": {
+                    "role": "assistant",
+                    "content": assistant_text,
+                },
+            }
+
+        web_search_mode = "off"
         if content.lower().startswith("/web "):
-            use_web_search = True
+            web_search_mode = "force"
             content = content[5:].strip()
+        elif bool(payload.get("enable_web_search", True)):
+            web_search_mode = "auto"
 
         image_data_urls = [
             attachment["data_url"]
@@ -444,7 +479,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             add_message(conn, conversation_id, user_message)
 
             try:
-                response_text = call_openai(messages, use_web_search=use_web_search)
+                response_text = call_openai(messages, web_search_mode=web_search_mode)
             except Exception as exc:
                 logger.exception("Model call failed for conversation %s", conversation_id)
                 raise ApiError(
@@ -477,10 +512,57 @@ class ChatHandler(BaseHTTPRequestHandler):
         if not content and not attachments:
             raise ApiError("Message content or attachments required")
 
-        use_web_search = False
+        if content.lower().startswith("/image "):
+            image_prompt = content[7:].strip()
+            if not image_prompt:
+                raise ApiError("Missing image prompt")
+
+            with connect_db() as conn:
+                if not conversation_exists(conn, conversation_id):
+                    raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
+                try:
+                    replace_message_from_id(conn, conversation_id, message_id, Message("user", image_prompt))
+                    image_url = call_openai_image(image_prompt)
+                except ValueError as exc:
+                    raise ApiError(str(exc), HTTPStatus.BAD_REQUEST) from exc
+                except Exception as exc:
+                    logger.exception(
+                        "Image generation failed while editing message %s in conversation %s",
+                        message_id,
+                        conversation_id,
+                    )
+                    raise ApiError(
+                        "Image generation failed",
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                    ) from exc
+
+                assistant_text = f"Generated image:\n\n![Generated image]({image_url})"
+                assistant_id = add_message_returning_id(
+                    conn,
+                    conversation_id,
+                    Message("assistant", assistant_text),
+                )
+
+            return {
+                "status": "ok",
+                "edited_message": {
+                    "id": message_id,
+                    "role": "user",
+                    "content": image_prompt,
+                },
+                "assistant_message": {
+                    "id": assistant_id,
+                    "role": "assistant",
+                    "content": assistant_text,
+                },
+            }
+
+        web_search_mode = "off"
         if content.lower().startswith("/web "):
-            use_web_search = True
+            web_search_mode = "force"
             content = content[5:].strip()
+        elif bool(payload.get("enable_web_search", True)):
+            web_search_mode = "auto"
 
         image_data_urls = [
             attachment["data_url"]
@@ -518,7 +600,7 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             try:
                 replace_message_from_id(conn, conversation_id, message_id, user_message)
-                response_text = call_openai(messages, use_web_search=use_web_search)
+                response_text = call_openai(messages, web_search_mode=web_search_mode)
             except ValueError as exc:
                 raise ApiError(str(exc), HTTPStatus.BAD_REQUEST) from exc
             except Exception as exc:
