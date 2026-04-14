@@ -20,6 +20,7 @@ EMBEDDINGS_ENABLED = os.environ.get("CHATBOT_USE_EMBEDDINGS", "1").lower() not i
 EMBEDDINGS_TOP_K = int(os.environ.get("CHATBOT_EMBEDDINGS_TOP_K", "6"))
 ENV_PATH = os.environ.get("CHATBOT_ENV_FILE", ".env")
 WEB_SEARCH_ENABLED = os.environ.get("CHATBOT_ENABLE_WEB_SEARCH", "1").lower() not in {"0", "false", "no"}
+WEB_SEARCH_TOOL = os.environ.get("OPENAI_WEB_SEARCH_TOOL", "web_search").strip() or "web_search"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
@@ -536,7 +537,8 @@ def call_openai(messages: Iterable[Message], web_search_mode: str = "off") -> st
     }
     normalized_mode = (web_search_mode or "off").strip().lower()
     if WEB_SEARCH_ENABLED and normalized_mode in {"auto", "force"}:
-        payload["tools"] = [{"type": "web_search_preview"}]
+        tool_type = WEB_SEARCH_TOOL if WEB_SEARCH_TOOL in {"web_search", "web_search_preview"} else "web_search"
+        payload["tools"] = [{"type": tool_type}]
         if normalized_mode == "force":
             payload["tool_choice"] = "required"
 
