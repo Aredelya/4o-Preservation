@@ -414,10 +414,12 @@ class ChatHandler(BaseHTTPRequestHandler):
                 "title": new_title,
             }
 
-        use_web_search = False
+        web_search_mode = "off"
         if content.lower().startswith("/web "):
-            use_web_search = True
+            web_search_mode = "force"
             content = content[5:].strip()
+        elif bool(payload.get("enable_web_search", True)):
+            web_search_mode = "auto"
 
         image_data_urls = [
             attachment["data_url"]
@@ -444,7 +446,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             add_message(conn, conversation_id, user_message)
 
             try:
-                response_text = call_openai(messages, use_web_search=use_web_search)
+                response_text = call_openai(messages, web_search_mode=web_search_mode)
             except Exception as exc:
                 logger.exception("Model call failed for conversation %s", conversation_id)
                 raise ApiError(
@@ -477,10 +479,12 @@ class ChatHandler(BaseHTTPRequestHandler):
         if not content and not attachments:
             raise ApiError("Message content or attachments required")
 
-        use_web_search = False
+        web_search_mode = "off"
         if content.lower().startswith("/web "):
-            use_web_search = True
+            web_search_mode = "force"
             content = content[5:].strip()
+        elif bool(payload.get("enable_web_search", True)):
+            web_search_mode = "auto"
 
         image_data_urls = [
             attachment["data_url"]
@@ -518,7 +522,7 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             try:
                 replace_message_from_id(conn, conversation_id, message_id, user_message)
-                response_text = call_openai(messages, use_web_search=use_web_search)
+                response_text = call_openai(messages, web_search_mode=web_search_mode)
             except ValueError as exc:
                 raise ApiError(str(exc), HTTPStatus.BAD_REQUEST) from exc
             except Exception as exc:
