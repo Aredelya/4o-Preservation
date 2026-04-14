@@ -149,6 +149,7 @@ const renderMarkdown = (content = "") => {
   const html = [];
   let inCodeBlock = false;
   let codeLang = "";
+  let codeFence = "";
   let inList = false;
 
   const closeListIfOpen = () => {
@@ -173,15 +174,18 @@ const renderMarkdown = (content = "") => {
   for (const rawLine of lines) {
     const line = rawLine ?? "";
 
-    if (line.startsWith("```")) {
+    const fenceMatch = line.match(/^\s{0,3}(```+|~~~+)\s*([^`]*)$/);
+    if (fenceMatch) {
       closeListIfOpen();
       if (!inCodeBlock) {
         inCodeBlock = true;
-        codeLang = line.slice(3).trim();
+        codeFence = fenceMatch[1];
+        codeLang = (fenceMatch[2] || "").trim();
         const classAttr = codeLang ? ` class="lang-${escapeHtml(codeLang)}"` : "";
         html.push(`<pre><code${classAttr}>`);
-      } else {
+      } else if (fenceMatch[1][0] === codeFence[0] && fenceMatch[1].length >= codeFence.length) {
         inCodeBlock = false;
+        codeFence = "";
         codeLang = "";
         html.push("</code></pre>");
       }
@@ -229,6 +233,7 @@ const renderMarkdown = (content = "") => {
   closeListIfOpen();
 
   if (inCodeBlock) {
+    codeFence = "";
     html.push("</code></pre>");
   }
 
