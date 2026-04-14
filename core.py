@@ -12,7 +12,9 @@ from urllib import error, request
 
 DB_PATH = os.environ.get("CHATBOT_DB", "chatbot.db")
 API_URL = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/responses")
+IMAGES_API_URL = os.environ.get("OPENAI_IMAGES_API_URL", "https://api.openai.com/v1/images/generations")
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-2024-11-20")
+IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1")
 MAX_HISTORY = int(os.environ.get("CHATBOT_MAX_HISTORY", "50"))
 MAX_OUTPUT_TOKENS = int(os.environ.get("CHATBOT_MAX_OUTPUT_TOKENS", "800"))
 EMBEDDING_MODEL = os.environ.get("CHATBOT_EMBEDDING_MODEL", "text-embedding-3-small")
@@ -565,6 +567,50 @@ def call_openai(messages: Iterable[Message], web_search_mode: str = "off") -> st
         return text
 
     raise RuntimeError(f"Unexpected API response format: {response_data}")
+
+
+def call_openai_image(prompt: str, size: str = "1024x1024") -> str:
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
+
+    payload = {
+        "model": IMAGE_MODEL,
+        "prompt": prompt,
+        "size": size,
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = request.Request(
+        IMAGES_API_URL,
+        data=data,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    try:
+        with request.urlopen(req, timeout=120) as response:
+            response_data = json.loads(response.read().decode("utf-8"))
+    except error.HTTPError as http_error:
+        detail = http_error.read().decode("utf-8")
+        raise RuntimeError(
+            f"OpenAI Images API error ({http_error.code}): {detail}"
+        ) from http_error
+
+    data_items = response_data.get("data")
+    if isinstance(data_items, list) and data_items:
+        first = data_items[0]
+        if isinstance(first, dict):
+            b64_json = first.get("b64_json")
+            if isinstance(b64_json, str) and b64_json:
+                return f"data:image/png;base64,{b64_json}"
+            url_value = first.get("url")
+            if isinstance(url_value, str) and url_value:
+                return url_value
+
+    raise RuntimeError(f"Unexpected Images API response format: {response_data}")
 
 
 def extract_response_text(response_data: dict) -> str:

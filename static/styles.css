@@ -478,6 +478,14 @@ h2 {
   color: #a6c0ff;
 }
 
+.bubble img {
+  display: block;
+  max-width: min(520px, 100%);
+  height: auto;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+}
+
 .memory-item {
   display: flex;
   flex-direction: column;

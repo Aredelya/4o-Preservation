@@ -161,6 +161,10 @@ const renderMarkdown = (content = "") => {
 
   const renderInline = (text) => {
     let line = escapeHtml(text);
+    line = line.replace(
+      /!\[([^\]]*?)\]\((https?:\/\/[^\s)]+|data:image\/[a-zA-Z0-9.+-]+;base64,[a-zA-Z0-9+/=]+)\)/g,
+      '<img src="$2" alt="$1" loading="lazy" />',
+    );
     line = line.replace(/`([^`]+?)`/g, "<code>$1</code>");
     line = line.replace(/\*\*([^*]+?)\*\*/g, "<strong>$1</strong>");
     line = line.replace(/\*([^*]+?)\*/g, "<em>$1</em>");
