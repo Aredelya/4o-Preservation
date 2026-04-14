@@ -524,7 +524,7 @@ def build_system_prompt(conn: sqlite3.Connection, query: Optional[str] = None) -
     return SYSTEM_PROMPT_TEMPLATE.format(memories=memories_text)
 
 
-def call_openai(messages: Iterable[Message], use_web_search: bool = False) -> str:
+def call_openai(messages: Iterable[Message], web_search_mode: str = "off") -> str:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
@@ -534,8 +534,11 @@ def call_openai(messages: Iterable[Message], use_web_search: bool = False) -> st
         "input": [{"role": message.role, "content": message.content} for message in messages],
         "max_output_tokens": MAX_OUTPUT_TOKENS,
     }
-    if WEB_SEARCH_ENABLED and use_web_search:
+    normalized_mode = (web_search_mode or "off").strip().lower()
+    if WEB_SEARCH_ENABLED and normalized_mode in {"auto", "force"}:
         payload["tools"] = [{"type": "web_search_preview"}]
+        if normalized_mode == "force":
+            payload["tool_choice"] = "required"
 
     data = json.dumps(payload).encode("utf-8")
     req = request.Request(
