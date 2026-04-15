@@ -17,6 +17,7 @@ const messageList = document.getElementById("messageList");
 const conversationTitle = document.getElementById("conversationTitle");
 const messageInput = document.getElementById("messageInput");
 const fileInput = document.getElementById("fileInput");
+const imageCommandHint = document.getElementById("imageCommandHint");
 const newConversationBtn = document.getElementById("newConversation");
 const sendMessageBtn = document.getElementById("sendMessage");
 const enableWebSearchInput = document.getElementById("enableWebSearch");
