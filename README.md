@@ -95,7 +95,8 @@ same database on the VPS.
 - `/memory delete <id>` — delete a memory
 - `/memory clear` — remove all memories
 - `/history [n]` — show previous messages from the current conversation
-- `/image [options] [prompt]` — generate an image in the web UI, or send an image from CLI- `/file <path> [prompt]` — send a text-like file from CLI
+- `/image [options] [prompt]` — generate an image in the web UI, or send an image from CLI
+- `/file <path> [prompt]` — send a text-like file from CLI
 - `/web <query>` — run a web search-backed query (CLI)
 - `/help` — show help
 - `/exit` — quit
