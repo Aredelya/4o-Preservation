@@ -705,17 +705,74 @@ def stream_openai(
     yield {"type": "done", "text": full_text}
 
 
-def call_openai_image(prompt: str, size: str = "1024x1024") -> str:
+def call_openai_image(
+    prompt: str,
+    *,
+    size: str = "1024x1024",
+    quality: str | None = None,
+    background: str | None = None,
+    output_format: str | None = None,
+    output_compression: int | None = None,
+    moderation: str | None = None,
+    n: int | None = None,
+) -> str:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
+
+    allowed_sizes = {"1024x1024", "1024x1536", "1536x1024", "auto"}
+    allowed_qualities = {"auto", "low", "medium", "high", "standard", "hd"}
+    allowed_backgrounds = {"auto", "transparent", "opaque"}
+    allowed_output_formats = {"png", "jpeg", "webp"}
+    allowed_moderation = {"auto", "low"}
+
+    if size not in allowed_sizes:
+        raise ValueError(f"Unsupported size: {size}")
+
+    if quality is not None and quality not in allowed_qualities:
+        raise ValueError(f"Unsupported quality: {quality}")
+
+    if background is not None and background not in allowed_backgrounds:
+        raise ValueError(f"Unsupported background: {background}")
+
+    if output_format is not None and output_format not in allowed_output_formats:
+        raise ValueError(f"Unsupported output_format: {output_format}")
+
+    if moderation is not None and moderation not in allowed_moderation:
+        raise ValueError(f"Unsupported moderation: {moderation}")
+
+    if output_compression is not None:
+        if not isinstance(output_compression, int) or not (0 <= output_compression <= 100):
+            raise ValueError("output_compression must be an integer from 0 to 100")
+
+    if n is not None:
+        if not isinstance(n, int) or not (1 <= n <= 10):
+            raise ValueError("n must be an integer from 1 to 10")
+
+    if background == "transparent" and output_format not in (None, "png", "webp"):
+        raise ValueError("Transparent background requires output_format png or webp")
 
     payload = {
         "model": IMAGE_MODEL,
         "prompt": prompt,
         "size": size,
     }
+
+    if quality is not None:
+        payload["quality"] = quality
+    if background is not None:
+        payload["background"] = background
+    if output_format is not None:
+        payload["output_format"] = output_format
+    if output_compression is not None:
+        payload["output_compression"] = output_compression
+    if moderation is not None:
+        payload["moderation"] = moderation
+    if n is not None:
+        payload["n"] = n
+
     data = json.dumps(payload).encode("utf-8")
+
     req = request.Request(
         IMAGES_API_URL,
         data=data,
@@ -731,9 +788,7 @@ def call_openai_image(prompt: str, size: str = "1024x1024") -> str:
             response_data = json.loads(response.read().decode("utf-8"))
     except error.HTTPError as http_error:
         detail = http_error.read().decode("utf-8")
-        raise RuntimeError(
-            f"OpenAI Images API error ({http_error.code}): {detail}"
-        ) from http_error
+        raise RuntimeError(f"OpenAI Images API error ({http_error.code}): {detail}") from http_error
 
     data_items = response_data.get("data")
     if isinstance(data_items, list) and data_items:
@@ -741,7 +796,14 @@ def call_openai_image(prompt: str, size: str = "1024x1024") -> str:
         if isinstance(first, dict):
             b64_json = first.get("b64_json")
             if isinstance(b64_json, str) and b64_json:
-                return f"data:image/png;base64,{b64_json}"
+                fmt = response_data.get("output_format") or payload.get("output_format") or "png"
+                mime = {
+                    "png": "image/png",
+                    "jpeg": "image/jpeg",
+                    "webp": "image/webp",
+                }.get(fmt, "image/png")
+                return f"data:{mime};base64,{b64_json}"
+
             url_value = first.get("url")
             if isinstance(url_value, str) and url_value:
                 return url_value
