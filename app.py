@@ -145,12 +145,17 @@ def send_user_message(
     user_message: Message,
     query: str,
     web_search_mode: str = "off",
+    enable_code_interpreter: bool = True,
 ) -> None:
     history = get_recent_messages(conn, conversation_id)
     system_prompt = build_system_prompt(conn, query)
     messages = [Message("system", system_prompt), *history, user_message]
 
-    response_text = call_openai(messages, web_search_mode=web_search_mode)
+    response_text = call_openai(
+        messages,
+        web_search_mode=web_search_mode,
+        enable_code_interpreter=enable_code_interpreter,
+    )
     add_message(conn, conversation_id, user_message)
     add_message(conn, conversation_id, Message("assistant", response_text))
     print(f"\nAssistant: {response_text}")
@@ -279,7 +284,14 @@ def main() -> int:
                     continue
                 try:
                     user_message = create_user_message(text=f"Use web search and answer with sources: {query}")
-                    send_user_message(conn, conversation_id, user_message, query, web_search_mode="force")
+                    send_user_message(
+                        conn,
+                        conversation_id,
+                        user_message,
+                        query,
+                        web_search_mode="force",
+                        enable_code_interpreter=True,
+                    )
                 except Exception as exc:
                     print(f"Error: {exc}")
                 continue
@@ -317,7 +329,14 @@ def main() -> int:
 
         user_message = create_user_message(text=user_input)
         try:
-            send_user_message(conn, conversation_id, user_message, user_input, web_search_mode="auto")
+            send_user_message(
+                conn,
+                conversation_id,
+                user_message,
+                user_input,
+                web_search_mode="auto",
+                enable_code_interpreter=True,
+            )
         except RuntimeError as exc:
             print(f"Error: {exc}")
             continue

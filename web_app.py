@@ -448,6 +448,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             }
 
         web_search_mode = "off"
+        enable_code_interpreter = bool(payload.get("enable_code_interpreter", True))
         if content.lower().startswith("/web "):
             web_search_mode = "force"
             content = content[5:].strip()
@@ -479,7 +480,11 @@ class ChatHandler(BaseHTTPRequestHandler):
             add_message(conn, conversation_id, user_message)
 
             try:
-                response_text = call_openai(messages, web_search_mode=web_search_mode)
+                response_text = call_openai(
+                    messages,
+                    web_search_mode=web_search_mode,
+                    enable_code_interpreter=enable_code_interpreter,
+                )
             except Exception as exc:
                 logger.exception("Model call failed for conversation %s", conversation_id)
                 raise ApiError(
@@ -558,6 +563,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             }
 
         web_search_mode = "off"
+        enable_code_interpreter = bool(payload.get("enable_code_interpreter", True))
         if content.lower().startswith("/web "):
             web_search_mode = "force"
             content = content[5:].strip()
@@ -600,7 +606,11 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             try:
                 replace_message_from_id(conn, conversation_id, message_id, user_message)
-                response_text = call_openai(messages, web_search_mode=web_search_mode)
+                response_text = call_openai(
+                    messages,
+                    web_search_mode=web_search_mode,
+                    enable_code_interpreter=enable_code_interpreter,
+                )
             except ValueError as exc:
                 raise ApiError(str(exc), HTTPStatus.BAD_REQUEST) from exc
             except Exception as exc:

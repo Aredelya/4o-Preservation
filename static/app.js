@@ -20,6 +20,7 @@ const fileInput = document.getElementById("fileInput");
 const newConversationBtn = document.getElementById("newConversation");
 const sendMessageBtn = document.getElementById("sendMessage");
 const enableWebSearchInput = document.getElementById("enableWebSearch");
+const enableCodeInterpreterInput = document.getElementById("enableCodeInterpreter");
 const memoryInput = document.getElementById("memoryInput");
 const saveMemoryBtn = document.getElementById("saveMemory");
 const memoryList = document.getElementById("memoryList");
@@ -619,6 +620,7 @@ const sendMessage = async () => {
       content,
       attachments,
       enable_web_search: !!enableWebSearchInput?.checked,
+      enable_code_interpreter: !!enableCodeInterpreterInput?.checked,
     };
 
     if (isEditing) {
