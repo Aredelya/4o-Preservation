@@ -702,6 +702,7 @@ h2 {
     grid-template-columns: 1fr;
     grid-template-areas:
       "text"
+      "hint"
       "file"
       "toggle"
       "send";
