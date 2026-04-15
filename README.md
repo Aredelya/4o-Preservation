@@ -95,7 +95,7 @@ same database on the VPS.
 - `/memory delete <id>` — delete a memory
 - `/memory clear` — remove all memories
 - `/history [n]` — show previous messages from the current conversation
-- `/image <path> [prompt]` — send an image from CLI
+- /image [options] [prompt] — generate an image in the web UI, or send an image from CLI
 - `/file <path> [prompt]` — send a text-like file from CLI
 - `/web <query>` — run a web search-backed query (CLI)
 - `/help` — show help
@@ -124,8 +124,7 @@ Yes — web search is now supported.
 - You can disable this feature globally with `CHATBOT_ENABLE_WEB_SEARCH=0`.
 
 ## Sending images and files
-
-Yes—this project supports file inputs:
+Yes—this project supports file inputs and image generation:
 
 - **CLI**
   - `/image ./photo.jpg What is in this image?`
@@ -133,7 +132,15 @@ Yes—this project supports file inputs:
   - `/file` currently supports text-like files (`.txt`, `.md`, `.csv`, `.json`, `.py`, `.log`).
 
 - **Web UI**
-  - Use the file picker next to the message box to attach images or text files before sending.
+  - Use the file picker next to the message box to attach images or text files before sending. Images are sent as multimodal `input_image` blocks and text files are included as `input_text` blocks.
+  - You can also generate an image by starting a message with `/image`.
+
+### `/image` in the Web UI
+
+The web app supports inline image-generation options at the start of the command:
+
+```text
+/image size=1536x1024 quality=high background=transparent A glass spaceship in a desert
 
 Images are sent as multimodal `input_image` blocks and text files are included as `input_text` blocks.
 
