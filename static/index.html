@@ -58,7 +58,27 @@
       </section>
 
       <section class="panel-chat" aria-label="Active conversation">
-        <h2 id="conversationTitle">Chat</h2>
+        <div class="panel-heading chat-panel-heading">
+          <h2 id="conversationTitle">Chat</h2>
+          <div class="chat-heading-actions">
+            <button
+              id="exportConversationMarkdown"
+              type="button"
+              class="secondary"
+              title="Export current conversation as Markdown"
+            >
+              Export .md
+            </button>
+            <button
+              id="exportConversationJson"
+              type="button"
+              class="secondary"
+              title="Export current conversation as JSON"
+            >
+              Export .json
+            </button>
+          </div>
+        </div>
         <div id="statusBanner" class="status" aria-live="polite"></div>
         <div class="messages" id="messageList" aria-live="polite"></div>
 
