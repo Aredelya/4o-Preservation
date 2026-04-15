@@ -406,8 +406,14 @@ h2 {
   padding: 10px 12px;
 }
 
-.search-toggle {
+.composer-toggles {
   grid-area: toggle;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+}
+
+.search-toggle {
   justify-self: start;
   display: inline-flex;
   align-items: center;
@@ -657,6 +663,10 @@ h2 {
 
   .search-toggle {
     justify-self: start;
+  }
+
+  .composer-toggles {
+    gap: 10px;
   }
 
   textarea {
