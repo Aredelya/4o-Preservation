@@ -482,36 +482,37 @@ class ChatHandler(BaseHTTPRequestHandler):
             }
 
         if content.lower().startswith("/image "):
-            image_prompt = content[7:].strip()
-            if not image_prompt:
-                raise ApiError("Missing image prompt")
-
+            raw_image_command = content[7:].strip()
+            image_prompt, image_options = self._parse_image_command_args(raw_image_command)
+        
             with connect_db() as conn:
                 if not conversation_exists(conn, conversation_id):
                     raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
-
-                user_message = Message("user", image_prompt)
+        
+                user_message = Message("user", content)
                 add_message(conn, conversation_id, user_message)
-
+        
                 try:
-                    image_url = call_openai_image(image_prompt)
+                    image_url = call_openai_image(image_prompt, **image_options)
+                except ValueError as exc:
+                    raise ApiError(str(exc)) from exc
                 except Exception as exc:
                     logger.exception("Image generation failed for conversation %s", conversation_id)
                     raise ApiError(
                         "Image generation failed",
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                     ) from exc
-
+        
                 assistant_text = f"Generated image:\n\n![Generated image]({image_url})"
                 add_message(conn, conversation_id, Message("assistant", assistant_text))
-
-            return {
-                "status": "ok",
-                "assistant_message": {
-                    "role": "assistant",
-                    "content": assistant_text,
-                },
-            }
+        
+                return {
+                    "status": "ok",
+                    "assistant_message": {
+                        "role": "assistant",
+                        "content": assistant_text,
+                    },
+                }
 
         web_search_mode = "off"
         enable_code_interpreter = bool(payload.get("enable_code_interpreter", True))
