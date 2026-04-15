@@ -554,6 +554,7 @@ const createBubble = ({ role, content, extraClass = "", id = "" }) => {
   }
 
   bubble.innerHTML = renderMarkdown(content);
+  attachCodeCopyButtons(bubble);
   return bubble;
 };
 
