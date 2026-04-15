@@ -171,6 +171,26 @@ header strong {
   justify-content: space-between;
 }
 
+.chat-panel-heading {
+  margin-bottom: 14px;
+}
+
+.chat-panel-heading h2 {
+  margin: 0;
+}
+
+.chat-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.chat-heading-actions button {
+  min-height: 38px;
+  padding: 9px 12px;
+}
+
 .mobile-only {
   display: none;
 }
@@ -622,6 +642,20 @@ h2 {
 
   .panel-chat {
     min-height: 0;
+  }
+  
+  .chat-panel-heading {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .chat-heading-actions {
+    width: 100%;
+  }
+
+  .chat-heading-actions button {
+    flex: 1 1 0;
   }
 
   .panel-conversations {
