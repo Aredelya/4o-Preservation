@@ -188,8 +188,10 @@ const startEditingMessage = (message) => {
   messageInput.value = message.content || "";
   clearDraftAttachments();
   setEditingState(message.id);
+  updateImageCommandHint();
   messageInput.focus();
   messageInput.setSelectionRange(messageInput.value.length, messageInput.value.length);
+
   setStatus("Editing message. Everything after it will be replaced when you resend.");
 };
 
