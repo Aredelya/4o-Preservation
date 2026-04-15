@@ -220,6 +220,104 @@ const downloadConversationExport = async (format) => {
   URL.revokeObjectURL(objectUrl);
 };
 
+const triggerBrowserDownload = (href, filename) => {
+  const link = document.createElement("a");
+  link.href = href;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+};
+
+const downloadImageFromSrc = async (src, filename = "generated-image.png") => {
+  if (!src) {
+    throw new Error("Missing image source");
+  }
+
+  if (src.startsWith("data:image/")) {
+    triggerBrowserDownload(src, filename);
+    return;
+  }
+
+  try {
+    const response = await fetch(src, {
+      method: "GET",
+      credentials: "omit",
+    });
+
+    if (!response.ok) {
+      throw new Error(`Image request failed (${response.status})`);
+    }
+
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+
+    try {
+      triggerBrowserDownload(objectUrl, filename);
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
+    return;
+  } catch (_error) {
+    window.open(src, "_blank", "noopener,noreferrer");
+  }
+};
+
+const inferImageExtension = (src = "") => {
+  if (src.startsWith("data:image/")) {
+    const match = src.match(/^data:image\/([a-zA-Z0-9.+-]+);base64,/);
+    const ext = (match?.[1] || "png").toLowerCase();
+    return ext === "jpeg" ? "jpg" : ext;
+  }
+
+  try {
+    const url = new URL(src, window.location.origin);
+    const pathname = url.pathname || "";
+    const match = pathname.match(/\.([a-zA-Z0-9]+)$/);
+    if (match) {
+      return match[1].toLowerCase();
+    }
+  } catch (_error) {
+    // ignore and fall back
+  }
+
+  return "png";
+};
+
+const addImageDownloadActions = (wrap, bubble, message) => {
+  if (!wrap || !bubble || !message || message.role !== "assistant") return;
+
+  const images = Array.from(bubble.querySelectorAll("img"));
+  if (!images.length) return;
+
+  const actions = document.createElement("div");
+  actions.className = "image-actions";
+
+  images.forEach((img, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary image-action-button";
+    button.textContent = images.length > 1 ? `Download image ${index + 1}` : "Download image";
+    button.onclick = async () => {
+      try {
+        const extension = inferImageExtension(img.currentSrc || img.src);
+        const filenameBase = message.id ? `conversation-image-${message.id}` : "generated-image";
+        const filename = images.length > 1
+          ? `${filenameBase}-${index + 1}.${extension}`
+          : `${filenameBase}.${extension}`;
+
+        await downloadImageFromSrc(img.currentSrc || img.src, filename);
+        setStatus("Image download started.", "", 2000);
+      } catch (error) {
+        setStatus(`Failed to download image: ${error.message}`, "error");
+      }
+    };
+    actions.appendChild(button);
+  });
+
+  wrap.appendChild(actions);
+};
+
 const setComposerBusy = (busy) => {
   state.isSending = busy;
   messageInput.disabled = busy;
