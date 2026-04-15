@@ -934,4 +934,5 @@ mobileHistoryMedia.addEventListener("change", () => {
 });
 
 initializeApp();
+updateImageCommandHint();
 window.addEventListener("load", scheduleMessageBottomSnap);
