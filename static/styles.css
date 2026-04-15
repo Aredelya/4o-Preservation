@@ -413,6 +413,38 @@ h2 {
   min-height: 104px;
 }
 
+.composer-hint {
+
+ grid-area: hint;
+
+ font-size: 0.82rem;
+
+ line-height: 1.45;
+
+ color: var(--muted);
+
+ background: rgba(255, 255, 255, 0.04);
+
+ border: 1px solid rgba(255, 255, 255, 0.08);
+
+ border-radius: 10px;
+
+ padding: 10px 12px;
+
+}
+
+.composer-hint code {
+
+ font-size: 0.8rem;
+
+}
+
+.composer-hint[hidden] {
+
+ display: none;
+
+}
+
 .composer #fileInput {
   grid-area: file;
   width: 100%;
