@@ -134,12 +134,11 @@ Yes—this project supports file inputs and image generation:
 - **Web UI**
   - Use the file picker next to the message box to attach images or text files before sending. Images are sent as multimodal `input_image` blocks and text files are included as `input_text` blocks.
   - You can also generate an image by starting a message with `/image`.
-
-### `/image` in the Web UI
+    
+/image in the Web UI
 
 The web app supports inline image-generation options at the start of the command:
 
-```text
 /image size=1536x1024 quality=high background=transparent A glass spaceship in a desert
 
 Supported options:
@@ -158,6 +157,17 @@ Examples:
 /image model=dall-e-3 A castle at sunset
 
 Only leading key=value pairs are treated as options. Once normal prompt text starts, the rest is treated as the prompt.
+
+And immediately after that, your next line should be:
+
+FAQ: Are embeddings useful for chatbot memory?
+
+Also delete this stray text if it’s still in the file:
+
+FAQ: Are embeddings useful for chatbot memory?
+
+So the issue is not subtle — that section did not actually get replaced yet.
+[oaicite:
 
 FAQ: Are embeddings useful for chatbot memory?
 
