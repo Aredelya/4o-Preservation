@@ -171,6 +171,16 @@ const clearDraftAttachments = () => {
   fileInput.value = "";
 };
 
+const isImageCommandDraft = (value = "") =>
+  String(value).trimStart().toLowerCase().startsWith("/image ");
+
+const updateImageCommandHint = () => {
+  if (!imageCommandHint) return;
+  const visible = isImageCommandDraft(messageInput.value);
+  imageCommandHint.hidden = !visible;
+  imageCommandHint.setAttribute("aria-hidden", visible ? "false" : "true");
+};
+
 const startEditingMessage = (message) => {
   if (!message || message.role !== "user") return;
 
