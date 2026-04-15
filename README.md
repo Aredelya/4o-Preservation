@@ -142,7 +142,26 @@ The web app supports inline image-generation options at the start of the command
 ```text
 /image size=1536x1024 quality=high background=transparent A glass spaceship in a desert
 
-## FAQ: Are embeddings useful for chatbot memory?
+Supported options:
+
+model=gpt-image-1.5|gpt-image-1|gpt-image-1-mini|dall-e-3|dall-e-2
+size=1024x1024|1024x1536|1536x1024|auto
+quality=low|medium|high|auto
+background=transparent|opaque|auto
+output_format=png|webp|jpeg
+
+Examples:
+
+/image A neon owl in the rain
+/image size=1536x1024 quality=high A neon owl in the rain
+/image background=transparent output_format=webp A sticker-style fox
+/image model=dall-e-3 A castle at sunset
+
+Only leading key=value pairs are treated as options. Once normal prompt text starts, the rest is treated as the prompt.
+
+FAQ: Are embeddings useful for chatbot memory?
+
+So the issue is not subtle — that section did not actually get replaced yet. :contentReference[oaicite:
 
 Yes, and this project now supports them. When embeddings are enabled, each memory is vectorized and the
 app retrieves the top-k most semantically relevant memories for each user message before building the
