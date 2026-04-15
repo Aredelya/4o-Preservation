@@ -397,6 +397,27 @@ h2 {
   font-size: 0.85rem;
 }
 
+.code-block-wrap {
+  position: relative;
+}
+
+.code-block-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 6px;
+}
+
+.code-copy-button {
+  padding: 6px 10px;
+  font-size: 0.8rem;
+}
+
+.message-row.assistant .message-actions,
+.message-row.user .message-actions,
+.image-actions {
+  flex-wrap: wrap;
+}
+
 .image-actions {
   display: flex;
   flex-wrap: wrap;
