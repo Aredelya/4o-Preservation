@@ -199,6 +199,8 @@ const cancelEditingMessage = () => {
   setEditingState(null);
   messageInput.value = "";
   clearDraftAttachments();
+  updateImageCommandHint();
+
   setStatus("", "");
 };
 
