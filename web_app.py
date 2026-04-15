@@ -444,54 +444,6 @@ class ChatHandler(BaseHTTPRequestHandler):
                 raise ApiError(f"Unsupported attachment kind for '{name}'")
 
         return validated
-
-    def _parse_image_command_args(self, raw: str) -> tuple[str, dict]:
-        try:
-            tokens = shlex.split(raw)
-        except ValueError as exc:
-            raise ApiError("Invalid /image command syntax") from exc
-
-        options: dict = {}
-        prompt_parts: list[str] = []
-
-        key_map = {
-            "size": "size",
-            "quality": "quality",
-            "background": "background",
-            "format": "output_format",
-            "output_format": "output_format",
-            "compression": "output_compression",
-            "output_compression": "output_compression",
-            "moderation": "moderation",
-            "n": "n",
-        }
-
-        for token in tokens:
-            if token.startswith("--") and "=" in token:
-                raw_key, raw_value = token[2:].split("=", 1)
-                key = key_map.get(raw_key.strip().lower())
-                if not key:
-                    raise ApiError(f"Unknown image option: --{raw_key}")
-
-                value = raw_value.strip()
-                if not value:
-                    raise ApiError(f"Missing value for --{raw_key}")
-
-                if key in {"output_compression", "n"}:
-                    try:
-                        value = int(value)
-                    except ValueError as exc:
-                        raise ApiError(f"Invalid integer for --{raw_key}") from exc
-
-                options[key] = value
-            else:
-                prompt_parts.append(token)
-
-        prompt = " ".join(prompt_parts).strip()
-        if not prompt:
-            raise ApiError("Missing image prompt")
-
-        return prompt, options
     
     def _list_conversations(self, query: str) -> dict:
         with connect_db() as conn:
@@ -602,11 +554,11 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         if content.lower().startswith("/image "):
             raw_image_command = content[7:].strip()
-            image_prompt, image_options = parse_image_command(raw_image_command)
             with connect_db() as conn:
                 if not conversation_exists(conn, conversation_id):
                     raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
                 try:
+                    image_prompt, image_options = parse_image_command(raw_image_command)
                     add_message(conn, conversation_id, Message("user", content))
                     image_url = call_openai_image(image_prompt, **image_options)
                 except ValueError as exc:
@@ -782,11 +734,11 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         if content.lower().startswith("/image "):
             raw_image_command = content[7:].strip()
-            image_prompt, image_options = parse_image_command(raw_image_command)
             with connect_db() as conn:
                 if not conversation_exists(conn, conversation_id):
                     raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
                 try:
+                    image_prompt, image_options = parse_image_command(raw_image_command)
                     replace_message_from_id(
                         conn,
                         conversation_id,
