@@ -518,19 +518,6 @@ const createMessageElement = (message) => {
   return wrap;
 };
 
-    const editButton = document.createElement("button");
-    editButton.type = "button";
-    editButton.className = "secondary message-action-button";
-    editButton.textContent = "Edit";
-    editButton.onclick = () => startEditingMessage(message);
-
-    actions.appendChild(editButton);
-    wrap.appendChild(actions);
-  }
-
-  return wrap;
-};
-
 const appendMessageBubble = ({ role, content, extraClass = "", id = "" }) => {
   const bubble = createBubble({ role, content, extraClass, id });
   messageList.appendChild(bubble);
