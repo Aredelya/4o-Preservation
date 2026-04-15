@@ -11,7 +11,7 @@ from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from core import (
     ENV_PATH,
@@ -29,6 +29,7 @@ from core import (
     create_conversation,
     delete_conversation,
     delete_memory,
+    fetch_container_file_content,
     get_all_messages_with_ids,
     get_conversation_title,
     get_message_row,
@@ -665,6 +666,40 @@ class ChatHandler(BaseHTTPRequestHandler):
             clear_memories(conn)
         return {"status": "ok"}
 
+    def _handle_container_file_download(
+        self,
+        container_id: str,
+        file_id: str,
+        filename_hint: str = "",
+    ) -> None:
+        safe_container_id = (container_id or "").strip()
+        safe_file_id = (file_id or "").strip()
+        safe_filename = (filename_hint or "").strip() or f"{safe_file_id}.bin"
+        safe_filename = safe_filename.replace("/", "_").replace("\\", "_")
+
+        if not safe_container_id or not safe_file_id:
+            raise ApiError("Missing container_id or file_id")
+
+        try:
+            payload, content_type = fetch_container_file_content(safe_container_id, safe_file_id)
+        except Exception as exc:
+            logger.exception(
+                "Failed to download container file %s from container %s",
+                safe_file_id,
+                safe_container_id,
+            )
+            raise ApiError("Unable to download generated file", HTTPStatus.BAD_GATEWAY) from exc
+
+        self._send_bytes(
+            payload,
+            content_type,
+            HTTPStatus.OK,
+            extra_headers={
+                "Content-Disposition": f'attachment; filename="{safe_filename}"',
+                "Cache-Control": "no-store",
+            },
+        )
+
     def do_GET(self) -> None:
         try:
             parsed = urlparse(self.path)
@@ -723,6 +758,11 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             if len(parts) == 3 and parts[:2] == ["api", "conversations"]:
                 self._send_json(self._get_conversation_messages(parts[2]))
+                return
+
+            if len(parts) >= 4 and parts[:2] == ["api", "container-files"]:
+                filename = unquote(parts[4]) if len(parts) >= 5 else ""
+                self._handle_container_file_download(parts[2], parts[3], filename)
                 return
 
             if parts == ["api", "memories"]:

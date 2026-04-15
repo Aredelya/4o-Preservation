@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable, List, Optional, Tuple
 from urllib import error, request
+from urllib.parse import quote
 
 DB_PATH = os.environ.get("CHATBOT_DB", "chatbot.db")
 API_URL = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/responses")
@@ -586,6 +587,15 @@ def call_openai(
 
     text = extract_response_text(response_data)
     if text:
+        citations = extract_container_file_citations(response_data)
+        if citations:
+            lines = []
+            for container_id, file_id, filename in citations:
+                safe_name = filename or f"file-{file_id}"
+                lines.append(
+                    f"- [{safe_name}](/api/container-files/{container_id}/{file_id}/{quote(safe_name)})"
+                )
+            text = f"{text}\n\nDownloads:\n" + "\n".join(lines)
         return text
 
     raise RuntimeError(f"Unexpected API response format: {response_data}")
@@ -633,6 +643,64 @@ def call_openai_image(prompt: str, size: str = "1024x1024") -> str:
                 return url_value
 
     raise RuntimeError(f"Unexpected Images API response format: {response_data}")
+
+
+def extract_container_file_citations(response_data: dict) -> List[Tuple[str, str, str]]:
+    citations: List[Tuple[str, str, str]] = []
+    seen = set()
+
+    for item in response_data.get("output", []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "message" or item.get("role") != "assistant":
+            continue
+
+        for block in item.get("content", []):
+            if not isinstance(block, dict):
+                continue
+            for annotation in block.get("annotations", []):
+                if not isinstance(annotation, dict):
+                    continue
+                if annotation.get("type") != "container_file_citation":
+                    continue
+
+                container_id = str(annotation.get("container_id") or "").strip()
+                file_id = str(annotation.get("file_id") or "").strip()
+                filename = str(annotation.get("filename") or "").strip()
+                if not container_id or not file_id:
+                    continue
+
+                key = (container_id, file_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                citations.append((container_id, file_id, filename))
+
+    return citations
+
+
+def fetch_container_file_content(container_id: str, file_id: str) -> Tuple[bytes, str]:
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
+
+    url = f"https://api.openai.com/v1/containers/{container_id}/files/{file_id}/content"
+    req = request.Request(
+        url,
+        method="GET",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+
+    try:
+        with request.urlopen(req, timeout=120) as response:
+            payload = response.read()
+            content_type = response.headers.get("Content-Type", "application/octet-stream")
+            return payload, content_type
+    except error.HTTPError as http_error:
+        detail = http_error.read().decode("utf-8")
+        raise RuntimeError(
+            f"Container file download error ({http_error.code}): {detail}"
+        ) from http_error
 
 
 def extract_response_text(response_data: dict) -> str:

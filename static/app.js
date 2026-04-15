@@ -170,7 +170,7 @@ const renderMarkdown = (content = "") => {
     line = line.replace(/\*\*([^*]+?)\*\*/g, "<strong>$1</strong>");
     line = line.replace(/\*([^*]+?)\*/g, "<em>$1</em>");
     line = line.replace(
-      /\[([^\]]+?)\]\((https?:\/\/[^\s)]+)\)/g,
+      /\[([^\]]+?)\]\((https?:\/\/[^\s)]+|\/[^\s)]+)\)/g,
       '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>',
     );
     return line;
