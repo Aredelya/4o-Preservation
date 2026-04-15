@@ -571,17 +571,33 @@ const createMessageElement = (message) => {
   wrap.appendChild(bubble);
   addImageDownloadActions(wrap, bubble, message);
 
-  if (message.role === "user" && message.id) {
-    const actions = document.createElement("div");
-    actions.className = "message-actions";
+  const actions = document.createElement("div");
+  actions.className = "message-actions";
 
+  const copyButton = document.createElement("button");
+  copyButton.type = "button";
+  copyButton.className = "secondary message-action-button";
+  copyButton.textContent = "Copy";
+  copyButton.onclick = async () => {
+    try {
+      await copyTextToClipboard(message.content || "");
+      setStatus("Message copied.", "", 1800);
+    } catch (error) {
+      setStatus(`Failed to copy message: ${error.message}`, "error");
+    }
+  };
+  actions.appendChild(copyButton);
+
+  if (message.role === "user" && message.id) {
     const editButton = document.createElement("button");
     editButton.type = "button";
     editButton.className = "secondary message-action-button";
     editButton.textContent = "Edit";
     editButton.onclick = () => startEditingMessage(message);
-
     actions.appendChild(editButton);
+  }
+
+  if (actions.childElementCount > 0) {
     wrap.appendChild(actions);
   }
 
