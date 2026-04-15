@@ -263,6 +263,75 @@ const downloadImageFromSrc = async (src, filename = "generated-image.png") => {
   }
 };
 
+const copyTextToClipboard = async (text) => {
+  const value = String(text ?? "");
+  if (!value) {
+    throw new Error("Nothing to copy");
+  }
+
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.appendChild(textarea);
+  textarea.select();
+
+  try {
+    const ok = document.execCommand("copy");
+    if (!ok) {
+      throw new Error("Copy command failed");
+    }
+  } finally {
+    textarea.remove();
+  }
+};
+
+const attachCodeCopyButtons = (bubble) => {
+  if (!bubble) return;
+
+  const codeBlocks = Array.from(bubble.querySelectorAll("pre > code"));
+  for (const code of codeBlocks) {
+    const pre = code.parentElement;
+    if (!pre) continue;
+    if (pre.parentElement?.classList.contains("code-block-wrap")) continue;
+
+    const wrap = document.createElement("div");
+    wrap.className = "code-block-wrap";
+
+    const actions = document.createElement("div");
+    actions.className = "code-block-actions";
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary code-copy-button";
+    button.textContent = "Copy code";
+    button.onclick = async () => {
+      try {
+        await copyTextToClipboard(code.textContent || "");
+        setStatus("Code copied.", "", 1800);
+      } catch (error) {
+        setStatus(`Failed to copy code: ${error.message}`, "error");
+      }
+    };
+
+    actions.appendChild(button);
+
+    const parent = pre.parentNode;
+    if (!parent) continue;
+
+    parent.insertBefore(wrap, pre);
+    wrap.appendChild(actions);
+    wrap.appendChild(pre);
+  }
+};
+
 const inferImageExtension = (src = "") => {
   if (src.startsWith("data:image/")) {
     const match = src.match(/^data:image\/([a-zA-Z0-9.+-]+);base64,/);
