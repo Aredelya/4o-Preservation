@@ -64,11 +64,31 @@
 
         <div class="composer">
           <textarea
-            id="messageInput"
-            placeholder="Type a message..."
-            aria-label="Message input"
+          id="messageInput"
+                
+          placeholder="Type a message..."
+                
+          aria-label="Message input"
+                
           ></textarea>
-
+                
+          <div
+          id="imageCommandHint"
+          class="composer-hint"
+          hidden
+          aria-live="polite"
+          aria-hidden="true"
+          >
+          <strong>/image options:</strong>
+          <code>model=gpt-image-1.5|gpt-image-1|gpt-image-1-mini|dall-e-3|dall-e-2</code>,
+          <code>size=1024x1024|1024x1536|1536x1024|auto</code>,
+          <code>quality=low|medium|high|auto</code>,
+          <code>background=transparent|opaque|auto</code>,
+          <code>output_format=png|webp|jpeg</code>.
+          Example:
+          <code>/image size=1536x1024 quality=high background=transparent A glass spaceship in a desert</code>
+          </div>
+        
           <input
             type="file"
             id="fileInput"
