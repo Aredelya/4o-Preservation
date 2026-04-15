@@ -752,6 +752,9 @@ def call_openai_image(
     if background == "transparent" and output_format not in (None, "png", "webp"):
         raise ValueError("Transparent background requires output_format png or webp")
 
+    if output_compression is not None and output_format not in ("jpeg", "webp"):
+        raise ValueError("output_compression requires output_format jpeg or webp")
+
     payload = {
         "model": IMAGE_MODEL,
         "prompt": prompt,
@@ -788,7 +791,9 @@ def call_openai_image(
             response_data = json.loads(response.read().decode("utf-8"))
     except error.HTTPError as http_error:
         detail = http_error.read().decode("utf-8")
-        raise RuntimeError(f"OpenAI Images API error ({http_error.code}): {detail}") from http_error
+        raise RuntimeError(
+            f"OpenAI Images API error ({http_error.code}): {detail}"
+        ) from http_error
 
     data_items = response_data.get("data")
     if isinstance(data_items, list) and data_items:
@@ -796,7 +801,7 @@ def call_openai_image(
         if isinstance(first, dict):
             b64_json = first.get("b64_json")
             if isinstance(b64_json, str) and b64_json:
-                fmt = response_data.get("output_format") or payload.get("output_format") or "png"
+                fmt = payload.get("output_format") or response_data.get("output_format") or "png"
                 mime = {
                     "png": "image/png",
                     "jpeg": "image/jpeg",
