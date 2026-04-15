@@ -11,7 +11,7 @@ from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from core import (
     ENV_PATH,
@@ -22,12 +22,14 @@ from core import (
     build_system_prompt,
     build_user_content,
     call_openai,
+    call_openai_image,
     clear_memories,
     connect_db,
     conversation_exists,
     create_conversation,
     delete_conversation,
     delete_memory,
+    fetch_container_file_content,
     get_all_messages_with_ids,
     get_conversation_title,
     get_message_row,
@@ -38,6 +40,7 @@ from core import (
     load_env_file,
     replace_message_from_id,
     search_conversations,
+    stream_openai,
     update_conversation_title,
 )
 
@@ -163,6 +166,21 @@ class ChatHandler(BaseHTTPRequestHandler):
     def _send_json(self, data: dict, status: HTTPStatus = HTTPStatus.OK, extra_headers=None) -> None:
         payload = json.dumps(data).encode("utf-8")
         self._send_bytes(payload, "application/json; charset=utf-8", status, extra_headers=extra_headers)
+
+    def _send_sse_headers(self) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
+
+    def _send_sse_event(self, data: dict) -> None:
+        chunk = f"data: {json.dumps(data)}\n\n".encode("utf-8")
+        self.wfile.write(chunk)
+        self.wfile.flush()
 
     def _send_text(self, text: str, status: HTTPStatus = HTTPStatus.OK, extra_headers=None) -> None:
         payload = text.encode("utf-8")
@@ -414,10 +432,45 @@ class ChatHandler(BaseHTTPRequestHandler):
                 "title": new_title,
             }
 
-        use_web_search = False
+        if content.lower().startswith("/image "):
+            image_prompt = content[7:].strip()
+            if not image_prompt:
+                raise ApiError("Missing image prompt")
+
+            with connect_db() as conn:
+                if not conversation_exists(conn, conversation_id):
+                    raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
+
+                user_message = Message("user", image_prompt)
+                add_message(conn, conversation_id, user_message)
+
+                try:
+                    image_url = call_openai_image(image_prompt)
+                except Exception as exc:
+                    logger.exception("Image generation failed for conversation %s", conversation_id)
+                    raise ApiError(
+                        "Image generation failed",
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                    ) from exc
+
+                assistant_text = f"Generated image:\n\n![Generated image]({image_url})"
+                add_message(conn, conversation_id, Message("assistant", assistant_text))
+
+            return {
+                "status": "ok",
+                "assistant_message": {
+                    "role": "assistant",
+                    "content": assistant_text,
+                },
+            }
+
+        web_search_mode = "off"
+        enable_code_interpreter = bool(payload.get("enable_code_interpreter", True))
         if content.lower().startswith("/web "):
-            use_web_search = True
+            web_search_mode = "force"
             content = content[5:].strip()
+        elif bool(payload.get("enable_web_search", True)):
+            web_search_mode = "auto"
 
         image_data_urls = [
             attachment["data_url"]
@@ -444,7 +497,11 @@ class ChatHandler(BaseHTTPRequestHandler):
             add_message(conn, conversation_id, user_message)
 
             try:
-                response_text = call_openai(messages, use_web_search=use_web_search)
+                response_text = call_openai(
+                    messages,
+                    web_search_mode=web_search_mode,
+                    enable_code_interpreter=enable_code_interpreter,
+                )
             except Exception as exc:
                 logger.exception("Model call failed for conversation %s", conversation_id)
                 raise ApiError(
@@ -462,6 +519,90 @@ class ChatHandler(BaseHTTPRequestHandler):
             },
         }
 
+    def _handle_send_message_stream(self, payload: dict) -> None:
+        conversation_id = payload.get("conversation_id")
+        content = (payload.get("content") or "").strip()
+        attachments = self._validate_attachments(payload.get("attachments") or [])
+
+        if not conversation_id:
+            raise ApiError("Missing conversation_id")
+        if not content and not attachments:
+            raise ApiError("Message content or attachments required")
+
+        if content.lower().startswith("/title") or content.lower().startswith("/image "):
+            # Fallback to non-stream path for command-like requests.
+            result = self._handle_send_message(payload)
+            self._send_sse_headers()
+            self._send_sse_event({"type": "done", "assistant_message": result.get("assistant_message", {})})
+            return
+
+        web_search_mode = "off"
+        enable_code_interpreter = bool(payload.get("enable_code_interpreter", True))
+        if content.lower().startswith("/web "):
+            web_search_mode = "force"
+            content = content[5:].strip()
+        elif bool(payload.get("enable_web_search", True)):
+            web_search_mode = "auto"
+
+        image_data_urls = [
+            attachment["data_url"]
+            for attachment in attachments
+            if attachment["kind"] == "image"
+        ]
+        file_texts = [
+            (attachment["name"], attachment["text"])
+            for attachment in attachments
+            if attachment["kind"] == "text"
+        ]
+
+        user_content = build_user_content(content or None, image_data_urls, file_texts)
+        user_message = Message("user", user_content)
+
+        with connect_db() as conn:
+            if not conversation_exists(conn, conversation_id):
+                raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
+
+            history = get_recent_messages(conn, conversation_id)
+            system_prompt = build_system_prompt(conn, content or "Attachment upload")
+            messages = [Message("system", system_prompt), *history, user_message]
+            add_message(conn, conversation_id, user_message)
+
+            self._send_sse_headers()
+
+            full_text = ""
+            try:
+                for event in stream_openai(
+                    messages,
+                    web_search_mode=web_search_mode,
+                    enable_code_interpreter=enable_code_interpreter,
+                ):
+                    event_type = event.get("type")
+                    if event_type == "text_delta":
+                        delta = str(event.get("delta") or "")
+                        if not delta:
+                            continue
+                        full_text += delta
+                        self._send_sse_event({"type": "delta", "delta": delta})
+                    elif event_type == "status":
+                        status = str(event.get("status") or "").strip()
+                        if status:
+                            self._send_sse_event({"type": "status", "status": status})
+                    elif event_type == "done":
+                        final_text = str(event.get("text") or full_text)
+                        add_message(conn, conversation_id, Message("assistant", final_text))
+                        self._send_sse_event(
+                            {
+                                "type": "done",
+                                "assistant_message": {
+                                    "role": "assistant",
+                                    "content": final_text,
+                                },
+                            }
+                        )
+            except Exception:
+                logger.exception("Streaming model call failed for conversation %s", conversation_id)
+                self._send_sse_event({"type": "error", "error": "Assistant request failed"})
+
     def _handle_edit_message(self, payload: dict) -> dict:
         conversation_id = payload.get("conversation_id")
         content = (payload.get("content") or "").strip()
@@ -477,10 +618,58 @@ class ChatHandler(BaseHTTPRequestHandler):
         if not content and not attachments:
             raise ApiError("Message content or attachments required")
 
-        use_web_search = False
+        if content.lower().startswith("/image "):
+            image_prompt = content[7:].strip()
+            if not image_prompt:
+                raise ApiError("Missing image prompt")
+
+            with connect_db() as conn:
+                if not conversation_exists(conn, conversation_id):
+                    raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
+                try:
+                    replace_message_from_id(conn, conversation_id, message_id, Message("user", image_prompt))
+                    image_url = call_openai_image(image_prompt)
+                except ValueError as exc:
+                    raise ApiError(str(exc), HTTPStatus.BAD_REQUEST) from exc
+                except Exception as exc:
+                    logger.exception(
+                        "Image generation failed while editing message %s in conversation %s",
+                        message_id,
+                        conversation_id,
+                    )
+                    raise ApiError(
+                        "Image generation failed",
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                    ) from exc
+
+                assistant_text = f"Generated image:\n\n![Generated image]({image_url})"
+                assistant_id = add_message_returning_id(
+                    conn,
+                    conversation_id,
+                    Message("assistant", assistant_text),
+                )
+
+            return {
+                "status": "ok",
+                "edited_message": {
+                    "id": message_id,
+                    "role": "user",
+                    "content": image_prompt,
+                },
+                "assistant_message": {
+                    "id": assistant_id,
+                    "role": "assistant",
+                    "content": assistant_text,
+                },
+            }
+
+        web_search_mode = "off"
+        enable_code_interpreter = bool(payload.get("enable_code_interpreter", True))
         if content.lower().startswith("/web "):
-            use_web_search = True
+            web_search_mode = "force"
             content = content[5:].strip()
+        elif bool(payload.get("enable_web_search", True)):
+            web_search_mode = "auto"
 
         image_data_urls = [
             attachment["data_url"]
@@ -518,7 +707,11 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             try:
                 replace_message_from_id(conn, conversation_id, message_id, user_message)
-                response_text = call_openai(messages, use_web_search=use_web_search)
+                response_text = call_openai(
+                    messages,
+                    web_search_mode=web_search_mode,
+                    enable_code_interpreter=enable_code_interpreter,
+                )
             except ValueError as exc:
                 raise ApiError(str(exc), HTTPStatus.BAD_REQUEST) from exc
             except Exception as exc:
@@ -572,6 +765,40 @@ class ChatHandler(BaseHTTPRequestHandler):
         with connect_db() as conn:
             clear_memories(conn)
         return {"status": "ok"}
+
+    def _handle_container_file_download(
+        self,
+        container_id: str,
+        file_id: str,
+        filename_hint: str = "",
+    ) -> None:
+        safe_container_id = (container_id or "").strip()
+        safe_file_id = (file_id or "").strip()
+        safe_filename = (filename_hint or "").strip() or f"{safe_file_id}.bin"
+        safe_filename = safe_filename.replace("/", "_").replace("\\", "_")
+
+        if not safe_container_id or not safe_file_id:
+            raise ApiError("Missing container_id or file_id")
+
+        try:
+            payload, content_type = fetch_container_file_content(safe_container_id, safe_file_id)
+        except Exception as exc:
+            logger.exception(
+                "Failed to download container file %s from container %s",
+                safe_file_id,
+                safe_container_id,
+            )
+            raise ApiError("Unable to download generated file", HTTPStatus.BAD_GATEWAY) from exc
+
+        self._send_bytes(
+            payload,
+            content_type,
+            HTTPStatus.OK,
+            extra_headers={
+                "Content-Disposition": f'attachment; filename="{safe_filename}"',
+                "Cache-Control": "no-store",
+            },
+        )
 
     def do_GET(self) -> None:
         try:
@@ -633,6 +860,11 @@ class ChatHandler(BaseHTTPRequestHandler):
                 self._send_json(self._get_conversation_messages(parts[2]))
                 return
 
+            if len(parts) >= 4 and parts[:2] == ["api", "container-files"]:
+                filename = unquote(parts[4]) if len(parts) >= 5 else ""
+                self._handle_container_file_download(parts[2], parts[3], filename)
+                return
+
             if parts == ["api", "memories"]:
                 self._send_json(self._list_memories())
                 return
@@ -685,6 +917,11 @@ class ChatHandler(BaseHTTPRequestHandler):
             if parts == ["api", "send"]:
                 payload = self._read_json()
                 self._send_json(self._handle_send_message(payload))
+                return
+
+            if parts == ["api", "send-stream"]:
+                payload = self._read_json()
+                self._handle_send_message_stream(payload)
                 return
 
             if parts == ["api", "edit"]:
