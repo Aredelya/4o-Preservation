@@ -66,6 +66,125 @@ WEB_COOKIE_SECURE = os.environ.get("CHATBOT_WEB_COOKIE_SECURE", "0").strip() == 
 
 logger = logging.getLogger(__name__)
 
+IMAGE_COMMAND_ALLOWED_MODELS = {
+    "gpt-image-1.5",
+    "gpt-image-1",
+    "gpt-image-1-mini",
+    "dall-e-2",
+    "dall-e-3",
+}
+
+IMAGE_COMMAND_ALLOWED_SIZES = {
+    "1024x1024",
+    "1024x1536",
+    "1536x1024",
+    "auto",
+}
+
+IMAGE_COMMAND_ALLOWED_QUALITIES = {
+    "low",
+    "medium",
+    "high",
+    "auto",
+}
+
+IMAGE_COMMAND_ALLOWED_BACKGROUNDS = {
+    "transparent",
+    "opaque",
+    "auto",
+}
+
+IMAGE_COMMAND_ALLOWED_OUTPUT_FORMATS = {
+    "png",
+    "webp",
+    "jpeg",
+}
+
+
+def parse_image_command(raw_command: str) -> tuple[str, dict]:
+    tokens = shlex.split(raw_command or "")
+    if not tokens:
+        raise ValueError("Missing image prompt")
+
+    option_aliases = {
+        "model": "model",
+        "size": "size",
+        "quality": "quality",
+        "background": "background",
+        "output_format": "output_format",
+        "format": "output_format",
+        "fmt": "output_format",
+    }
+
+    options: dict[str, str] = {}
+    prompt_tokens: list[str] = []
+    parsing_options = True
+
+    for token in tokens:
+        if parsing_options and "=" in token:
+            key, value = token.split("=", 1)
+            normalized_key = option_aliases.get(key.strip().lower())
+            if normalized_key:
+                cleaned_value = value.strip()
+                if not cleaned_value:
+                    raise ValueError(f"Missing value for {key.strip()}")
+                options[normalized_key] = cleaned_value
+                continue
+        parsing_options = False
+        prompt_tokens.append(token)
+
+    prompt = " ".join(prompt_tokens).strip()
+    if not prompt:
+        raise ValueError("Missing image prompt")
+
+    if "model" in options:
+        model = options["model"].strip().lower()
+        if model not in IMAGE_COMMAND_ALLOWED_MODELS:
+            raise ValueError(
+                "Invalid image model. Allowed values: "
+                + ", ".join(sorted(IMAGE_COMMAND_ALLOWED_MODELS))
+            )
+        options["model"] = model
+
+    if "size" in options:
+        size = options["size"].strip().lower()
+        if size not in IMAGE_COMMAND_ALLOWED_SIZES:
+            raise ValueError(
+                "Invalid image size. Allowed values: "
+                + ", ".join(sorted(IMAGE_COMMAND_ALLOWED_SIZES))
+            )
+        options["size"] = size
+
+    if "quality" in options:
+        quality = options["quality"].strip().lower()
+        if quality not in IMAGE_COMMAND_ALLOWED_QUALITIES:
+            raise ValueError(
+                "Invalid image quality. Allowed values: "
+                + ", ".join(sorted(IMAGE_COMMAND_ALLOWED_QUALITIES))
+            )
+        options["quality"] = quality
+
+    if "background" in options:
+        background = options["background"].strip().lower()
+        if background not in IMAGE_COMMAND_ALLOWED_BACKGROUNDS:
+            raise ValueError(
+                "Invalid image background. Allowed values: "
+                + ", ".join(sorted(IMAGE_COMMAND_ALLOWED_BACKGROUNDS))
+            )
+        options["background"] = background
+
+    if "output_format" in options:
+        output_format = options["output_format"].strip().lower()
+        if output_format == "jpg":
+            output_format = "jpeg"
+        if output_format not in IMAGE_COMMAND_ALLOWED_OUTPUT_FORMATS:
+            raise ValueError(
+                "Invalid image output_format. Allowed values: "
+                + ", ".join(sorted(IMAGE_COMMAND_ALLOWED_OUTPUT_FORMATS))
+            )
+        options["output_format"] = output_format
+
+    return prompt, options
 
 def auth_enabled() -> bool:
     return bool(WEB_PASSWORD or WEB_PASSWORD_HASH)
