@@ -378,20 +378,34 @@ h2 {
 }
 
 .composer {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-areas:
-    "text send"
-    "file send"
-    "toggle send";
-  gap: 10px;
-  position: static;
-  bottom: auto;
-  background: rgba(14, 19, 31, 0.94);
-  padding: 14px;
-  margin-top: auto;
-  border-top: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+
+ display: grid;
+
+ grid-template-columns: minmax(0, 1fr) auto;
+
+ grid-template-areas:
+
+ "text send"
+ "hint send"
+ "file send"
+ "toggle send";
+
+ gap: 10px;
+
+ position: static;
+
+ bottom: auto;
+
+ background: rgba(14, 19, 31, 0.94);
+
+ padding: 14px;
+
+ margin-top: auto;
+
+ border-top: 1px solid var(--border);
+
+ border-radius: var(--radius-lg);
+
 }
 
 .composer textarea {
