@@ -7,12 +7,13 @@ import mimetypes
 import os
 import secrets
 import time
+import shlex
+import re
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
-import shlex
 
 from core import (
     ENV_PATH,
@@ -486,6 +487,83 @@ class ChatHandler(BaseHTTPRequestHandler):
             ]
 
         return {"title": title, "messages": messages}
+    
+    def _safe_export_basename(self, value: str) -> str:
+        cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", (value or "").strip())
+        cleaned = cleaned.strip(" .-_")
+        return cleaned or "conversation"
+
+    def _render_conversation_markdown(self, title: str, messages: list[dict]) -> str:
+        lines = [f"# {title or 'Untitled conversation'}", ""]
+
+        for message in messages:
+            role = str(message.get("role") or "unknown").strip().title()
+            created_at = str(message.get("created_at") or "").strip()
+            content = str(message.get("content") or "").rstrip()
+
+            lines.append(f"## {role}")
+            if created_at:
+                lines.append(f"_Created: {created_at}_")
+                lines.append("")
+            lines.append(content or "(empty)")
+            lines.append("")
+
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _handle_export_conversation(self, conversation_id: str, export_format: str) -> None:
+        normalized_format = (export_format or "md").strip().lower()
+
+        if normalized_format not in {"md", "markdown", "json"}:
+            raise ApiError("Invalid export format", HTTPStatus.BAD_REQUEST)
+
+        with connect_db() as conn:
+            if not conversation_exists(conn, conversation_id):
+                raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
+
+            title = get_conversation_title(conn, conversation_id) or "Untitled conversation"
+            messages = [
+                {
+                    "id": row["id"],
+                    "role": row["role"],
+                    "content": row["content"],
+                    "created_at": row["created_at"],
+                }
+                for row in get_all_messages_with_ids(conn, conversation_id)
+            ]
+
+        base_name = self._safe_export_basename(title)
+
+        if normalized_format in {"md", "markdown"}:
+            payload = self._render_conversation_markdown(title, messages).encode("utf-8")
+            self._send_bytes(
+                payload,
+                "text/markdown; charset=utf-8",
+                HTTPStatus.OK,
+                extra_headers={
+                    "Content-Disposition": f'attachment; filename="{base_name}.md"',
+                    "Cache-Control": "no-store",
+                },
+            )
+            return
+
+        payload = json.dumps(
+            {
+                "id": conversation_id,
+                "title": title,
+                "messages": messages,
+            },
+            indent=2,
+        ).encode("utf-8")
+
+        self._send_bytes(
+            payload,
+            "application/json; charset=utf-8",
+            HTTPStatus.OK,
+            extra_headers={
+                "Content-Disposition": f'attachment; filename="{base_name}.json"',
+                "Cache-Control": "no-store",
+            },
+        )
 
     def _list_memories(self) -> dict:
         with connect_db() as conn:
@@ -969,7 +1047,13 @@ class ChatHandler(BaseHTTPRequestHandler):
                 query = (params.get("q", [""])[0] or "").strip()
                 self._send_json(self._list_conversations(query))
                 return
-
+            
+            if len(parts) == 4 and parts[:2] == ["api", "conversations"] and parts[3] == "export":
+                params = parse_qs(parsed.query)
+                export_format = (params.get("format", ["md"])[0] or "md").strip()
+                self._handle_export_conversation(parts[2], export_format)
+                return
+            
             if len(parts) == 3 and parts[:2] == ["api", "conversations"]:
                 self._send_json(self._get_conversation_messages(parts[2]))
                 return
