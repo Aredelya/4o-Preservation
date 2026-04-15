@@ -885,6 +885,10 @@ messageInput.addEventListener("keydown", (event) => {
   }
 });
 
+messageInput.addEventListener("input", () => {
+  updateImageCommandHint();
+});
+
 conversationSearchInput.addEventListener("focus", () => {
   if (conversationSearchTimer) {
     clearTimeout(conversationSearchTimer);
