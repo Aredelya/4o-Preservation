@@ -601,6 +601,110 @@ def call_openai(
     raise RuntimeError(f"Unexpected API response format: {response_data}")
 
 
+def stream_openai(
+    messages: Iterable[Message],
+    web_search_mode: str = "off",
+    enable_code_interpreter: bool = True,
+):
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
+
+    payload = {
+        "model": MODEL,
+        "input": [{"role": message.role, "content": message.content} for message in messages],
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
+        "stream": True,
+    }
+    normalized_mode = (web_search_mode or "off").strip().lower()
+    tools = []
+
+    if WEB_SEARCH_ENABLED and normalized_mode in {"auto", "force"}:
+        tool_type = WEB_SEARCH_TOOL if WEB_SEARCH_TOOL in {"web_search", "web_search_preview"} else "web_search"
+        tools.append({"type": tool_type})
+        if normalized_mode == "force":
+            payload["tool_choice"] = "required"
+
+    if CODE_INTERPRETER_ENABLED and enable_code_interpreter:
+        tools.append(
+            {
+                "type": "code_interpreter",
+                "container": {
+                    "type": "auto",
+                    "memory_limit": CODE_INTERPRETER_MEMORY_LIMIT,
+                },
+            }
+        )
+
+    if tools:
+        payload["tools"] = tools
+
+    data = json.dumps(payload).encode("utf-8")
+    req = request.Request(
+        API_URL,
+        data=data,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    text_chunks: List[str] = []
+    completed_response = None
+
+    try:
+        with request.urlopen(req, timeout=180) as response:
+            for raw_line in response:
+                line = raw_line.decode("utf-8").strip()
+                if not line or not line.startswith("data:"):
+                    continue
+
+                payload_str = line[5:].strip()
+                if payload_str == "[DONE]":
+                    break
+
+                try:
+                    event = json.loads(payload_str)
+                except json.JSONDecodeError:
+                    continue
+
+                event_type = event.get("type")
+
+                if event_type == "response.output_text.delta":
+                    delta = event.get("delta")
+                    if isinstance(delta, str) and delta:
+                        text_chunks.append(delta)
+                        yield {"type": "text_delta", "delta": delta}
+                elif event_type in {"response.output_item.added", "response.output_item.done"}:
+                    item = event.get("item") or {}
+                    item_type = str(item.get("type") or "").strip()
+                    if item_type in {"code_interpreter_call", "web_search_call"}:
+                        yield {"type": "status", "status": item_type}
+                elif event_type == "response.completed":
+                    completed_response = event.get("response")
+    except error.HTTPError as http_error:
+        detail = http_error.read().decode("utf-8")
+        raise RuntimeError(f"OpenAI API error ({http_error.code}): {detail}") from http_error
+
+    full_text = "".join(text_chunks).strip()
+    if isinstance(completed_response, dict):
+        extracted = extract_response_text(completed_response)
+        if extracted:
+            full_text = extracted
+        citations = extract_container_file_citations(completed_response)
+        if citations:
+            lines = []
+            for container_id, file_id, filename in citations:
+                safe_name = filename or f"file-{file_id}"
+                lines.append(
+                    f"- [{safe_name}](/api/container-files/{container_id}/{file_id}/{quote(safe_name)})"
+                )
+            full_text = f"{full_text}\n\nDownloads:\n" + "\n".join(lines) if full_text else "Downloads:\n" + "\n".join(lines)
+
+    yield {"type": "done", "text": full_text}
+
+
 def call_openai_image(prompt: str, size: str = "1024x1024") -> str:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:

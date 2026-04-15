@@ -40,6 +40,7 @@ from core import (
     load_env_file,
     replace_message_from_id,
     search_conversations,
+    stream_openai,
     update_conversation_title,
 )
 
@@ -165,6 +166,21 @@ class ChatHandler(BaseHTTPRequestHandler):
     def _send_json(self, data: dict, status: HTTPStatus = HTTPStatus.OK, extra_headers=None) -> None:
         payload = json.dumps(data).encode("utf-8")
         self._send_bytes(payload, "application/json; charset=utf-8", status, extra_headers=extra_headers)
+
+    def _send_sse_headers(self) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
+
+    def _send_sse_event(self, data: dict) -> None:
+        chunk = f"data: {json.dumps(data)}\n\n".encode("utf-8")
+        self.wfile.write(chunk)
+        self.wfile.flush()
 
     def _send_text(self, text: str, status: HTTPStatus = HTTPStatus.OK, extra_headers=None) -> None:
         payload = text.encode("utf-8")
@@ -503,6 +519,90 @@ class ChatHandler(BaseHTTPRequestHandler):
             },
         }
 
+    def _handle_send_message_stream(self, payload: dict) -> None:
+        conversation_id = payload.get("conversation_id")
+        content = (payload.get("content") or "").strip()
+        attachments = self._validate_attachments(payload.get("attachments") or [])
+
+        if not conversation_id:
+            raise ApiError("Missing conversation_id")
+        if not content and not attachments:
+            raise ApiError("Message content or attachments required")
+
+        if content.lower().startswith("/title") or content.lower().startswith("/image "):
+            # Fallback to non-stream path for command-like requests.
+            result = self._handle_send_message(payload)
+            self._send_sse_headers()
+            self._send_sse_event({"type": "done", "assistant_message": result.get("assistant_message", {})})
+            return
+
+        web_search_mode = "off"
+        enable_code_interpreter = bool(payload.get("enable_code_interpreter", True))
+        if content.lower().startswith("/web "):
+            web_search_mode = "force"
+            content = content[5:].strip()
+        elif bool(payload.get("enable_web_search", True)):
+            web_search_mode = "auto"
+
+        image_data_urls = [
+            attachment["data_url"]
+            for attachment in attachments
+            if attachment["kind"] == "image"
+        ]
+        file_texts = [
+            (attachment["name"], attachment["text"])
+            for attachment in attachments
+            if attachment["kind"] == "text"
+        ]
+
+        user_content = build_user_content(content or None, image_data_urls, file_texts)
+        user_message = Message("user", user_content)
+
+        with connect_db() as conn:
+            if not conversation_exists(conn, conversation_id):
+                raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
+
+            history = get_recent_messages(conn, conversation_id)
+            system_prompt = build_system_prompt(conn, content or "Attachment upload")
+            messages = [Message("system", system_prompt), *history, user_message]
+            add_message(conn, conversation_id, user_message)
+
+            self._send_sse_headers()
+
+            full_text = ""
+            try:
+                for event in stream_openai(
+                    messages,
+                    web_search_mode=web_search_mode,
+                    enable_code_interpreter=enable_code_interpreter,
+                ):
+                    event_type = event.get("type")
+                    if event_type == "text_delta":
+                        delta = str(event.get("delta") or "")
+                        if not delta:
+                            continue
+                        full_text += delta
+                        self._send_sse_event({"type": "delta", "delta": delta})
+                    elif event_type == "status":
+                        status = str(event.get("status") or "").strip()
+                        if status:
+                            self._send_sse_event({"type": "status", "status": status})
+                    elif event_type == "done":
+                        final_text = str(event.get("text") or full_text)
+                        add_message(conn, conversation_id, Message("assistant", final_text))
+                        self._send_sse_event(
+                            {
+                                "type": "done",
+                                "assistant_message": {
+                                    "role": "assistant",
+                                    "content": final_text,
+                                },
+                            }
+                        )
+            except Exception:
+                logger.exception("Streaming model call failed for conversation %s", conversation_id)
+                self._send_sse_event({"type": "error", "error": "Assistant request failed"})
+
     def _handle_edit_message(self, payload: dict) -> dict:
         conversation_id = payload.get("conversation_id")
         content = (payload.get("content") or "").strip()
@@ -817,6 +917,11 @@ class ChatHandler(BaseHTTPRequestHandler):
             if parts == ["api", "send"]:
                 payload = self._read_json()
                 self._send_json(self._handle_send_message(payload))
+                return
+
+            if parts == ["api", "send-stream"]:
+                payload = self._read_json()
+                self._handle_send_message_stream(payload)
                 return
 
             if parts == ["api", "edit"]:

@@ -82,6 +82,60 @@ const api = async (path, options = {}) => {
   return body;
 };
 
+const apiStream = async (path, payload, handlers = {}) => {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify(payload),
+  });
+
+  if (response.status === 401) {
+    window.location.href = "/login";
+    throw new Error("Authentication required");
+  }
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || "Streaming request failed");
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error("Streaming not supported by this browser");
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() || "";
+
+    for (const frame of frames) {
+      const lines = frame.split("\n");
+      let dataLine = "";
+      for (const line of lines) {
+        if (line.startsWith("data:")) {
+          dataLine += line.slice(5).trim();
+        }
+      }
+      if (!dataLine) continue;
+
+      try {
+        const event = JSON.parse(dataLine);
+        handlers.onEvent?.(event);
+      } catch (error) {
+        console.warn("Failed to parse streaming event:", error);
+      }
+    }
+  }
+};
+
 const setStatus = (message = "", kind = "", timeoutMs = 0) => {
   if (!statusBanner) return;
 
@@ -630,10 +684,42 @@ const sendMessage = async () => {
     messageInput.value = "";
     fileInput.value = "";
 
-    const result = await api(requestPath, {
-      method: "POST",
-      body: JSON.stringify(requestBody),
-    });
+    let result;
+    if (isEditing) {
+      result = await api(requestPath, {
+        method: "POST",
+        body: JSON.stringify(requestBody),
+      });
+    } else {
+      let streamedText = "";
+      result = await new Promise((resolve, reject) => {
+        apiStream("/api/send-stream", requestBody, {
+          onEvent: (event) => {
+            if (event.type === "delta") {
+              streamedText += event.delta || "";
+              if (pendingBubble) {
+                pendingBubble.innerHTML = renderMarkdown(streamedText);
+              }
+              return;
+            }
+            if (event.type === "status") {
+              const statusText = String(event.status || "").replaceAll("_", " ");
+              if (statusText) {
+                setStatus(`Tool progress: ${statusText}...`, "", 2500);
+              }
+              return;
+            }
+            if (event.type === "error") {
+              reject(new Error(event.error || "Streaming request failed"));
+              return;
+            }
+            if (event.type === "done") {
+              resolve(event);
+            }
+          },
+        }).catch(reject);
+      });
+    }
 
     if (pendingBubble) {
       pendingBubble.innerHTML = renderMarkdown(result.assistant_message?.content || "(No response)");
