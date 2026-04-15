@@ -12,6 +12,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
+import shlex
 
 from core import (
     ENV_PATH,
@@ -325,6 +326,54 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         return validated
 
+    def _parse_image_command_args(self, raw: str) -> tuple[str, dict]:
+    try:
+        tokens = shlex.split(raw)
+    except ValueError as exc:
+        raise ApiError("Invalid /image command syntax") from exc
+
+    options: dict = {}
+    prompt_parts: list[str] = []
+
+    key_map = {
+        "size": "size",
+        "quality": "quality",
+        "background": "background",
+        "format": "output_format",
+        "output_format": "output_format",
+        "compression": "output_compression",
+        "output_compression": "output_compression",
+        "moderation": "moderation",
+        "n": "n",
+    }
+
+    for token in tokens:
+        if token.startswith("--") and "=" in token:
+            raw_key, raw_value = token[2:].split("=", 1)
+            key = key_map.get(raw_key.strip().lower())
+            if not key:
+                raise ApiError(f"Unknown image option: --{raw_key}")
+
+            value = raw_value.strip()
+            if not value:
+                raise ApiError(f"Missing value for --{raw_key}")
+
+            if key in {"output_compression", "n"}:
+                try:
+                    value = int(value)
+                except ValueError as exc:
+                    raise ApiError(f"Invalid integer for --{raw_key}") from exc
+
+            options[key] = value
+        else:
+            prompt_parts.append(token)
+
+    prompt = " ".join(prompt_parts).strip()
+    if not prompt:
+        raise ApiError("Missing image prompt")
+
+    return prompt, options
+    
     def _list_conversations(self, query: str) -> dict:
         with connect_db() as conn:
             if query:
