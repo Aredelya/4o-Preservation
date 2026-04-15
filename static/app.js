@@ -32,6 +32,8 @@ const statusBanner = document.getElementById("statusBanner");
 const historyToggleBtn = document.getElementById("historyToggle");
 const closeHistoryBtn = document.getElementById("closeHistory");
 const logoutButton = document.getElementById("logoutButton");
+const exportConversationMarkdownBtn = document.getElementById("exportConversationMarkdown");
+const exportConversationJsonBtn = document.getElementById("exportConversationJson");
 
 const setEditingState = (messageId = null) => {
   state.editingMessageId = messageId;
@@ -156,6 +158,67 @@ const setStatus = (message = "", kind = "", timeoutMs = 0) => {
     }, timeoutMs);
   }
 };
+const updateConversationActionState = () => {
+  const disabled = !state.activeConversation || state.isSending;
+  if (exportConversationMarkdownBtn) {
+    exportConversationMarkdownBtn.disabled = disabled;
+  }
+  if (exportConversationJsonBtn) {
+    exportConversationJsonBtn.disabled = disabled;
+  }
+};
+
+const downloadConversationExport = async (format) => {
+  if (!state.activeConversation) return;
+
+  const response = await fetch(
+    `/api/conversations/${encodeURIComponent(state.activeConversation)}/export?format=${encodeURIComponent(format)}`,
+    {
+      method: "GET",
+      credentials: "same-origin",
+    },
+  );
+
+  if (response.status === 401) {
+    window.location.href = "/login";
+    throw new Error("Authentication required");
+  }
+
+  if (!response.ok) {
+    let message = "Export failed";
+    try {
+      const contentType = response.headers.get("Content-Type") || "";
+      if (contentType.includes("application/json")) {
+        const body = await response.json();
+        if (body && typeof body === "object" && body.error) {
+          message = body.error;
+        }
+      } else {
+        const text = await response.text();
+        if (text.trim()) {
+          message = text.trim();
+        }
+      }
+    } catch (_error) {
+      // keep fallback message
+    }
+    throw new Error(message);
+  }
+
+  const blob = await response.blob();
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const match = disposition.match(/filename="([^"]+)"/);
+  const filename = match?.[1] || `conversation.${format === "json" ? "json" : "md"}`;
+
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(objectUrl);
+};
 
 const setComposerBusy = (busy) => {
   state.isSending = busy;
@@ -165,6 +228,7 @@ const setComposerBusy = (busy) => {
   sendMessageBtn.textContent = busy
     ? (state.editingMessageId ? "Saving..." : "Sending...")
     : (state.editingMessageId ? "Save & resend" : "Send");
+  updateConversationActionState();
 };
 
 const clearDraftAttachments = () => {
@@ -528,6 +592,7 @@ const loadConversations = async ({ refreshMessages = true } = {}) => {
   }
 
   renderConversations();
+  updateConversationActionState();
 
   if (!refreshMessages) return;
 
@@ -556,6 +621,7 @@ const selectConversation = async (conversationId) => {
   setEditingState(null);
   clearDraftAttachments();
   renderConversations();
+  updateConversationActionState();
   await loadMessages(conversationId);
   closeMobileHistory();
 };
@@ -565,6 +631,7 @@ const createConversation = async () => {
 
   const data = await api("/api/conversations", { method: "POST" });
   setEditingState(null);
+  updateConversationActionState();
   await loadConversations({ refreshMessages: false });
   await selectConversation(data.id);
   closeMobileHistory();
@@ -810,6 +877,7 @@ const deleteConversation = async (id) => {
     conversationTitle.textContent = "Chat";
     renderMessages([], false);
   }
+  updateConversationActionState();
 
   await loadConversations();
   setStatus("Conversation deleted.", "", 2000);
@@ -825,6 +893,7 @@ const initializeApp = async () => {
 
   try {
     await loadConversations();
+    updateConversationActionState();
     scheduleMessageBottomSnap();
   } catch (error) {
     console.error("Failed to load conversations:", error);
@@ -869,6 +938,28 @@ if (closeHistoryBtn) {
 if (logoutButton) {
   logoutButton.onclick = () => {
     window.location.href = "/logout";
+  };
+}
+
+if (exportConversationMarkdownBtn) {
+  exportConversationMarkdownBtn.onclick = async () => {
+    try {
+      await downloadConversationExport("md");
+      setStatus("Conversation exported as Markdown.", "", 2000);
+    } catch (error) {
+      setStatus(`Failed to export Markdown: ${error.message}`, "error");
+    }
+  };
+}
+
+if (exportConversationJsonBtn) {
+  exportConversationJsonBtn.onclick = async () => {
+    try {
+      await downloadConversationExport("json");
+      setStatus("Conversation exported as JSON.", "", 2000);
+    } catch (error) {
+      setStatus(`Failed to export JSON: ${error.message}`, "error");
+    }
   };
 }
 
@@ -934,5 +1025,6 @@ mobileHistoryMedia.addEventListener("change", () => {
 });
 
 initializeApp();
+updateConversationActionState();
 updateImageCommandHint();
 window.addEventListener("load", scheduleMessageBottomSnap);
