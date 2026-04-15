@@ -95,8 +95,7 @@ same database on the VPS.
 - `/memory delete <id>` — delete a memory
 - `/memory clear` — remove all memories
 - `/history [n]` — show previous messages from the current conversation
-- /image [options] [prompt] — generate an image in the web UI, or send an image from CLI
-- `/file <path> [prompt]` — send a text-like file from CLI
+- `/image [options] [prompt]` — generate an image in the web UI, or send an image from CLI- `/file <path> [prompt]` — send a text-like file from CLI
 - `/web <query>` — run a web search-backed query (CLI)
 - `/help` — show help
 - `/exit` — quit
@@ -141,8 +140,6 @@ The web app supports inline image-generation options at the start of the command
 
 ```text
 /image size=1536x1024 quality=high background=transparent A glass spaceship in a desert
-
-Images are sent as multimodal `input_image` blocks and text files are included as `input_text` blocks.
 
 ## FAQ: Are embeddings useful for chatbot memory?
 
