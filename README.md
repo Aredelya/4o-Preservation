@@ -1,4 +1,3 @@
-````md
 # 4o Preservation Chatbot
 
 A minimal command-line chatbot that recreates the ChatGPT 4o-style experience using the OpenAI API, with:
