@@ -499,10 +499,24 @@ const createMessageElement = (message) => {
   });
 
   wrap.appendChild(bubble);
+  addImageDownloadActions(wrap, bubble, message);
 
   if (message.role === "user" && message.id) {
     const actions = document.createElement("div");
     actions.className = "message-actions";
+
+    const editButton = document.createElement("button");
+    editButton.type = "button";
+    editButton.className = "secondary message-action-button";
+    editButton.textContent = "Edit";
+    editButton.onclick = () => startEditingMessage(message);
+
+    actions.appendChild(editButton);
+    wrap.appendChild(actions);
+  }
+
+  return wrap;
+};
 
     const editButton = document.createElement("button");
     editButton.type = "button";
