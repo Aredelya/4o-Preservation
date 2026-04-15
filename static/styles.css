@@ -382,7 +382,8 @@ h2 {
   grid-template-columns: minmax(0, 1fr) auto;
   grid-template-areas:
     "text send"
-    "file file";
+    "file send"
+    "toggle send";
   gap: 10px;
   position: static;
   bottom: auto;
@@ -405,9 +406,90 @@ h2 {
   padding: 10px 12px;
 }
 
+.composer-toggles {
+  grid-area: toggle;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+}
+
+.search-toggle {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
+.search-toggle input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
 #sendMessage {
   grid-area: send;
   min-width: 104px;
+}
+
+.bubble p,
+.bubble ul,
+.bubble pre,
+.bubble blockquote,
+.bubble h1,
+.bubble h2,
+.bubble h3 {
+  margin: 0 0 10px;
+}
+
+.bubble :last-child {
+  margin-bottom: 0;
+}
+
+.bubble ul {
+  padding-left: 1.2rem;
+}
+
+.bubble code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.9em;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 0.15em 0.35em;
+}
+
+.bubble pre {
+  overflow-x: auto;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.bubble pre code {
+  background: transparent;
+  border-radius: 0;
+  padding: 0;
+}
+
+.bubble blockquote {
+  border-left: 3px solid rgba(122, 162, 255, 0.42);
+  margin-left: 0;
+  padding-left: 10px;
+  color: var(--muted);
+}
+
+.bubble a {
+  color: #a6c0ff;
+}
+
+.bubble img {
+  display: block;
+  max-width: min(520px, 100%);
+  height: auto;
+  border-radius: 12px;
+  border: 1px solid var(--border);
 }
 
 .memory-item {
@@ -575,7 +657,16 @@ h2 {
     grid-template-areas:
       "text"
       "file"
+      "toggle"
       "send";
+  }
+
+  .search-toggle {
+    justify-self: start;
+  }
+
+  .composer-toggles {
+    gap: 10px;
   }
 
   textarea {

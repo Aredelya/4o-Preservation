@@ -76,6 +76,16 @@
             accept="image/*,.txt,.md,.csv,.json,.py,.log"
             aria-label="Attach files"
           />
+          <div class="composer-toggles">
+            <label class="search-toggle">
+              <input type="checkbox" id="enableWebSearch" checked />
+              Allow web search when needed
+            </label>
+            <label class="search-toggle">
+              <input type="checkbox" id="enableCodeInterpreter" checked />
+              Allow code interpreter
+            </label>
+          </div>
 
           <button class="primary" id="sendMessage" type="button">Send</button>
         </div>
