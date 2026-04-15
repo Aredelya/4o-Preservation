@@ -9,10 +9,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable, List, Optional, Tuple
 from urllib import error, request
+from urllib.parse import quote
 
 DB_PATH = os.environ.get("CHATBOT_DB", "chatbot.db")
 API_URL = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/responses")
+IMAGES_API_URL = os.environ.get("OPENAI_IMAGES_API_URL", "https://api.openai.com/v1/images/generations")
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-2024-11-20")
+IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1")
 MAX_HISTORY = int(os.environ.get("CHATBOT_MAX_HISTORY", "50"))
 MAX_OUTPUT_TOKENS = int(os.environ.get("CHATBOT_MAX_OUTPUT_TOKENS", "800"))
 EMBEDDING_MODEL = os.environ.get("CHATBOT_EMBEDDING_MODEL", "text-embedding-3-small")
@@ -20,6 +23,9 @@ EMBEDDINGS_ENABLED = os.environ.get("CHATBOT_USE_EMBEDDINGS", "1").lower() not i
 EMBEDDINGS_TOP_K = int(os.environ.get("CHATBOT_EMBEDDINGS_TOP_K", "6"))
 ENV_PATH = os.environ.get("CHATBOT_ENV_FILE", ".env")
 WEB_SEARCH_ENABLED = os.environ.get("CHATBOT_ENABLE_WEB_SEARCH", "1").lower() not in {"0", "false", "no"}
+WEB_SEARCH_TOOL = os.environ.get("OPENAI_WEB_SEARCH_TOOL", "web_search").strip() or "web_search"
+CODE_INTERPRETER_ENABLED = os.environ.get("CHATBOT_ENABLE_CODE_INTERPRETER", "1").lower() not in {"0", "false", "no"}
+CODE_INTERPRETER_MEMORY_LIMIT = os.environ.get("CHATBOT_CODE_INTERPRETER_MEMORY_LIMIT", "1g").strip() or "1g"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
@@ -524,7 +530,11 @@ def build_system_prompt(conn: sqlite3.Connection, query: Optional[str] = None) -
     return SYSTEM_PROMPT_TEMPLATE.format(memories=memories_text)
 
 
-def call_openai(messages: Iterable[Message], use_web_search: bool = False) -> str:
+def call_openai(
+    messages: Iterable[Message],
+    web_search_mode: str = "off",
+    enable_code_interpreter: bool = True,
+) -> str:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
@@ -534,8 +544,28 @@ def call_openai(messages: Iterable[Message], use_web_search: bool = False) -> st
         "input": [{"role": message.role, "content": message.content} for message in messages],
         "max_output_tokens": MAX_OUTPUT_TOKENS,
     }
-    if WEB_SEARCH_ENABLED and use_web_search:
-        payload["tools"] = [{"type": "web_search_preview"}]
+    normalized_mode = (web_search_mode or "off").strip().lower()
+    tools = []
+
+    if WEB_SEARCH_ENABLED and normalized_mode in {"auto", "force"}:
+        tool_type = WEB_SEARCH_TOOL if WEB_SEARCH_TOOL in {"web_search", "web_search_preview"} else "web_search"
+        tools.append({"type": tool_type})
+        if normalized_mode == "force":
+            payload["tool_choice"] = "required"
+
+    if CODE_INTERPRETER_ENABLED and enable_code_interpreter:
+        tools.append(
+            {
+                "type": "code_interpreter",
+                "container": {
+                    "type": "auto",
+                    "memory_limit": CODE_INTERPRETER_MEMORY_LIMIT,
+                },
+            }
+        )
+
+    if tools:
+        payload["tools"] = tools
 
     data = json.dumps(payload).encode("utf-8")
     req = request.Request(
@@ -557,9 +587,120 @@ def call_openai(messages: Iterable[Message], use_web_search: bool = False) -> st
 
     text = extract_response_text(response_data)
     if text:
+        citations = extract_container_file_citations(response_data)
+        if citations:
+            lines = []
+            for container_id, file_id, filename in citations:
+                safe_name = filename or f"file-{file_id}"
+                lines.append(
+                    f"- [{safe_name}](/api/container-files/{container_id}/{file_id}/{quote(safe_name)})"
+                )
+            text = f"{text}\n\nDownloads:\n" + "\n".join(lines)
         return text
 
     raise RuntimeError(f"Unexpected API response format: {response_data}")
+
+
+def call_openai_image(prompt: str, size: str = "1024x1024") -> str:
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
+
+    payload = {
+        "model": IMAGE_MODEL,
+        "prompt": prompt,
+        "size": size,
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = request.Request(
+        IMAGES_API_URL,
+        data=data,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    try:
+        with request.urlopen(req, timeout=120) as response:
+            response_data = json.loads(response.read().decode("utf-8"))
+    except error.HTTPError as http_error:
+        detail = http_error.read().decode("utf-8")
+        raise RuntimeError(
+            f"OpenAI Images API error ({http_error.code}): {detail}"
+        ) from http_error
+
+    data_items = response_data.get("data")
+    if isinstance(data_items, list) and data_items:
+        first = data_items[0]
+        if isinstance(first, dict):
+            b64_json = first.get("b64_json")
+            if isinstance(b64_json, str) and b64_json:
+                return f"data:image/png;base64,{b64_json}"
+            url_value = first.get("url")
+            if isinstance(url_value, str) and url_value:
+                return url_value
+
+    raise RuntimeError(f"Unexpected Images API response format: {response_data}")
+
+
+def extract_container_file_citations(response_data: dict) -> List[Tuple[str, str, str]]:
+    citations: List[Tuple[str, str, str]] = []
+    seen = set()
+
+    for item in response_data.get("output", []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "message" or item.get("role") != "assistant":
+            continue
+
+        for block in item.get("content", []):
+            if not isinstance(block, dict):
+                continue
+            for annotation in block.get("annotations", []):
+                if not isinstance(annotation, dict):
+                    continue
+                if annotation.get("type") != "container_file_citation":
+                    continue
+
+                container_id = str(annotation.get("container_id") or "").strip()
+                file_id = str(annotation.get("file_id") or "").strip()
+                filename = str(annotation.get("filename") or "").strip()
+                if not container_id or not file_id:
+                    continue
+
+                key = (container_id, file_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                citations.append((container_id, file_id, filename))
+
+    return citations
+
+
+def fetch_container_file_content(container_id: str, file_id: str) -> Tuple[bytes, str]:
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
+
+    url = f"https://api.openai.com/v1/containers/{container_id}/files/{file_id}/content"
+    req = request.Request(
+        url,
+        method="GET",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+
+    try:
+        with request.urlopen(req, timeout=120) as response:
+            payload = response.read()
+            content_type = response.headers.get("Content-Type", "application/octet-stream")
+            return payload, content_type
+    except error.HTTPError as http_error:
+        detail = http_error.read().decode("utf-8")
+        raise RuntimeError(
+            f"Container file download error ({http_error.code}): {detail}"
+        ) from http_error
 
 
 def extract_response_text(response_data: dict) -> str:
