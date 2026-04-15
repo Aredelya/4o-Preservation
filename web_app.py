@@ -326,7 +326,7 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         return validated
 
-    def _parse_image_command_args(self, raw: str) -> tuple[str, dict]:
+def _parse_image_command_args(self, raw: str) -> tuple[str, dict]:
     try:
         tokens = shlex.split(raw)
     except ValueError as exc:
@@ -669,16 +669,15 @@ class ChatHandler(BaseHTTPRequestHandler):
             raise ApiError("Message content or attachments required")
 
         if content.lower().startswith("/image "):
-            image_prompt = content[7:].strip()
-            if not image_prompt:
-                raise ApiError("Missing image prompt")
+            raw_image_command = content[7:].strip()
+            image_prompt, image_options = self._parse_image_command_args(raw_image_command)
 
             with connect_db() as conn:
                 if not conversation_exists(conn, conversation_id):
                     raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
                 try:
-                    replace_message_from_id(conn, conversation_id, message_id, Message("user", image_prompt))
-                    image_url = call_openai_image(image_prompt)
+                    replace_message_from_id(conn, conversation_id, message_id, Message("user", content))
+                    image_url = call_openai_image(image_prompt, **image_options)
                 except ValueError as exc:
                     raise ApiError(str(exc), HTTPStatus.BAD_REQUEST) from exc
                 except Exception as exc:
@@ -704,7 +703,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 "edited_message": {
                     "id": message_id,
                     "role": "user",
-                    "content": image_prompt,
+                    "content": content,
                 },
                 "assistant_message": {
                     "id": assistant_id,
