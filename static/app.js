@@ -426,6 +426,36 @@ const startEditingMessage = (message) => {
   setStatus("Editing message. Everything after it will be replaced when you resend.");
 };
 
+const regenerateAssistantMessage = async (message) => {
+  if (!message || message.role !== "assistant" || !message.id) return;
+  if (!state.activeConversation || state.isSending) return;
+
+  setComposerBusy(true);
+  setEditingState(null);
+  setStatus("Regenerating response...");
+
+  try {
+    await api("/api/regenerate", {
+      method: "POST",
+      body: JSON.stringify({
+        conversation_id: state.activeConversation,
+        message_id: message.id,
+        enable_web_search: !!enableWebSearchInput?.checked,
+        enable_code_interpreter: !!enableCodeInterpreterInput?.checked,
+      }),
+    });
+
+    await loadConversations({ refreshMessages: false });
+    await loadMessages(state.activeConversation);
+    setStatus("Response regenerated.", "", 2200);
+  } catch (error) {
+    setStatus(`Failed to regenerate response: ${error.message}`, "error");
+  } finally {
+    setComposerBusy(false);
+    messageInput.focus();
+  }
+};
+
 const cancelEditingMessage = () => {
   setEditingState(null);
   messageInput.value = "";
@@ -595,6 +625,17 @@ const createMessageElement = (message) => {
     editButton.textContent = "Edit";
     editButton.onclick = () => startEditingMessage(message);
     actions.appendChild(editButton);
+  }
+
+  if (message.role === "assistant" && message.id) {
+    const regenerateButton = document.createElement("button");
+    regenerateButton.type = "button";
+    regenerateButton.className = "secondary message-action-button";
+    regenerateButton.textContent = "Regenerate";
+    regenerateButton.onclick = () => {
+      void regenerateAssistantMessage(message);
+    };
+    actions.appendChild(regenerateButton);
   }
 
   if (actions.childElementCount > 0) {
