@@ -383,11 +383,39 @@ const ensureChatSearchUI = () => {
       align-items: center;
       flex-wrap: wrap;
       margin: 10px 0 12px;
+      padding: 8px 10px;
+      border-radius: 10px;
+    }
+
+    .chat-search-input-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1 1 260px;
+      min-width: 0;
+    }
+
+    .chat-search-icon {
+      font-size: 0.95em;
+      line-height: 1;
+      opacity: 0.75;
+      user-select: none;
+      flex: 0 0 auto;
     }
 
     .chat-search-bar input {
-      min-width: 220px;
-      flex: 1 1 220px;
+      min-width: 0;
+      width: 100%;
+      flex: 1 1 auto;
+    }
+
+    .chat-search-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 0 0 auto;
+      flex-wrap: wrap;
+      margin-left: auto;
     }
 
     .chat-search-count {
@@ -395,6 +423,7 @@ const ensureChatSearchUI = () => {
       opacity: 0.8;
       min-width: 3.5em;
       text-align: center;
+      white-space: nowrap;
     }
 
     mark.chat-search-hit {
@@ -408,27 +437,65 @@ const ensureChatSearchUI = () => {
       outline: 2px solid rgba(255, 170, 0, 0.9);
       background: rgba(255, 200, 80, 0.95);
     }
+
+    @media (max-width: 700px) {
+      .chat-search-bar {
+        align-items: stretch;
+      }
+
+      .chat-search-input-wrap {
+        flex: 1 1 100%;
+        width: 100%;
+      }
+
+      .chat-search-controls {
+        width: 100%;
+        margin-left: 0;
+        justify-content: flex-start;
+      }
+
+      .chat-search-controls button {
+        flex: 0 0 auto;
+      }
+
+      .chat-search-count {
+        margin-left: auto;
+      }
+    }
   `;
   document.head.appendChild(style);
 
   chatSearchBar = document.createElement("div");
   chatSearchBar.className = "chat-search-bar";
 
+  const chatSearchInputWrap = document.createElement("div");
+  chatSearchInputWrap.className = "chat-search-input-wrap";
+
+  const chatSearchIcon = document.createElement("span");
+  chatSearchIcon.className = "chat-search-icon";
+  chatSearchIcon.textContent = "🔍";
+  chatSearchIcon.setAttribute("aria-hidden", "true");
+
   chatSearchInput = document.createElement("input");
   chatSearchInput.type = "search";
   chatSearchInput.placeholder = "Search this chat";
   chatSearchInput.autocomplete = "off";
   chatSearchInput.spellcheck = false;
+  chatSearchInput.setAttribute("aria-label", "Search current conversation");
 
   chatSearchPrevBtn = document.createElement("button");
   chatSearchPrevBtn.type = "button";
   chatSearchPrevBtn.className = "secondary";
   chatSearchPrevBtn.textContent = "↑";
+  chatSearchPrevBtn.title = "Previous match";
+  chatSearchPrevBtn.setAttribute("aria-label", "Previous match");
 
   chatSearchNextBtn = document.createElement("button");
   chatSearchNextBtn.type = "button";
   chatSearchNextBtn.className = "secondary";
   chatSearchNextBtn.textContent = "↓";
+  chatSearchNextBtn.title = "Next match";
+  chatSearchNextBtn.setAttribute("aria-label", "Next match");
 
   chatSearchCount = document.createElement("span");
   chatSearchCount.className = "chat-search-count";
@@ -465,11 +532,19 @@ const ensureChatSearchUI = () => {
   chatSearchNextBtn.onclick = () => goToNextChatSearchMatch();
   chatSearchClearBtn.onclick = () => clearChatSearch();
 
-  chatSearchBar.appendChild(chatSearchInput);
-  chatSearchBar.appendChild(chatSearchPrevBtn);
-  chatSearchBar.appendChild(chatSearchNextBtn);
-  chatSearchBar.appendChild(chatSearchCount);
-  chatSearchBar.appendChild(chatSearchClearBtn);
+  const chatSearchControls = document.createElement("div");
+  chatSearchControls.className = "chat-search-controls";
+
+  chatSearchInputWrap.appendChild(chatSearchIcon);
+  chatSearchInputWrap.appendChild(chatSearchInput);
+
+  chatSearchControls.appendChild(chatSearchPrevBtn);
+  chatSearchControls.appendChild(chatSearchNextBtn);
+  chatSearchControls.appendChild(chatSearchCount);
+  chatSearchControls.appendChild(chatSearchClearBtn);
+
+  chatSearchBar.appendChild(chatSearchInputWrap);
+  chatSearchBar.appendChild(chatSearchControls);
 
   const anchor =
     conversationTitle?.parentElement && conversationTitle.parentElement.contains(messageList)
