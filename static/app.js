@@ -818,6 +818,43 @@ const startEditingMessage = (message) => {
   setStatus("Editing message. Everything after it will be replaced when you resend.");
 };
 
+const getMessageRowById = (messageId) => {
+  const bubbles = Array.from(messageList.querySelectorAll(".bubble[data-id]"));
+  const bubble = bubbles.find((node) => String(node.dataset.id) === String(messageId));
+  return bubble?.closest(".message-row") || null;
+};
+
+const getTailRowsFromMessageId = (messageId) => {
+  const rows = Array.from(messageList.querySelectorAll(".message-row"));
+  return rows.filter((row) => {
+    const bubble = row.querySelector(".bubble[data-id]");
+    if (!bubble) return false;
+    const rowMessageId = Number(bubble.dataset.id);
+    return Number.isFinite(rowMessageId) && rowMessageId >= Number(messageId);
+  });
+};
+
+const setRowsDimmed = (rows, dimmed) => {
+  for (const row of rows) {
+    row.style.opacity = dimmed ? "0.45" : "";
+  }
+};
+
+const createStreamingAssistantRow = (content = "Thinking...") => {
+  const row = document.createElement("div");
+  row.className = "message-row assistant";
+
+  const bubble = createBubble({
+    role: "assistant",
+    content,
+    extraClass: "pending",
+    id: `regen-pending-${Date.now()}`,
+  });
+
+  row.appendChild(bubble);
+  return { row, bubble };
+};
+
 const regenerateAssistantMessage = async (message) => {
   if (!message || message.role !== "assistant" || !message.id) return;
   if (!state.activeConversation || state.isSending) return;
@@ -826,21 +863,68 @@ const regenerateAssistantMessage = async (message) => {
   setEditingState(null);
   setStatus("Regenerating response...");
 
+  const tailRows = getTailRowsFromMessageId(message.id);
+  setRowsDimmed(tailRows, true);
+
+  const { row: streamingRow, bubble: streamingBubble } = createStreamingAssistantRow("Thinking...");
+  const anchorRow = tailRows.length ? tailRows[tailRows.length - 1] : getMessageRowById(message.id);
+
+  if (anchorRow?.parentNode) {
+    anchorRow.parentNode.insertBefore(streamingRow, anchorRow.nextSibling);
+  } else {
+    messageList.appendChild(streamingRow);
+  }
+
+  scheduleMessageBottomSnap();
+
   try {
-    await api("/api/regenerate", {
-      method: "POST",
-      body: JSON.stringify({
+    let streamedText = "";
+
+    const result = await new Promise((resolve, reject) => {
+      apiStream("/api/regenerate-stream", {
         conversation_id: state.activeConversation,
         message_id: message.id,
         enable_web_search: !!enableWebSearchInput?.checked,
         enable_code_interpreter: !!enableCodeInterpreterInput?.checked,
-      }),
+      }, {
+        onEvent: (event) => {
+          if (event.type === "delta") {
+            streamedText += event.delta || "";
+            streamingBubble.innerHTML = renderMarkdown(streamedText || "Thinking...");
+            return;
+          }
+
+          if (event.type === "status") {
+            const statusText = String(event.status || "").replaceAll("_", " ");
+            if (statusText) {
+              setStatus(`Tool progress: ${statusText}...`, "", 2500);
+            }
+            return;
+          }
+
+          if (event.type === "error") {
+            reject(new Error(event.error || "Streaming request failed"));
+            return;
+          }
+
+          if (event.type === "done") {
+            resolve(event);
+          }
+        },
+      }).catch(reject);
     });
+
+    streamingBubble.innerHTML = renderMarkdown(
+      result.assistant_message?.content || streamedText || "(No response)",
+    );
+    streamingBubble.classList.remove("pending");
 
     await loadConversations({ refreshMessages: false });
     await loadMessages(state.activeConversation);
     setStatus("Response regenerated.", "", 2200);
   } catch (error) {
+    streamingRow.remove();
+    setRowsDimmed(tailRows, false);
     setStatus(`Failed to regenerate response: ${error.message}`, "error");
   } finally {
     setComposerBusy(false);
