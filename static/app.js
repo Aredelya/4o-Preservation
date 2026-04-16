@@ -1647,6 +1647,34 @@ mobileHistoryMedia.addEventListener("change", () => {
   }
 });
 
+document.addEventListener("keydown", (event) => {
+  const isFindShortcut =
+    (event.ctrlKey || event.metaKey) &&
+    !event.shiftKey &&
+    !event.altKey &&
+    event.key.toLowerCase() === "f";
+
+  if (!isFindShortcut) return;
+
+  const activeEl = document.activeElement;
+  const tagName = activeEl?.tagName?.toLowerCase();
+  const isTypingInEditableField =
+    tagName === "input" ||
+    tagName === "textarea" ||
+    activeEl?.isContentEditable;
+
+  if (isTypingInEditableField && activeEl !== chatSearchInput) {
+    return;
+  }
+
+  if (!state.activeConversation || !chatSearchInput) return;
+
+  event.preventDefault();
+  ensureChatSearchUI();
+  chatSearchInput.focus();
+  chatSearchInput.select();
+});
+
 initializeApp();
 updateConversationActionState();
 updateImageCommandHint();
