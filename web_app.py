@@ -35,6 +35,7 @@ from core import (
     get_all_messages_with_ids,
     get_conversation_title,
     get_message_row,
+    get_previous_user_message_row,
     get_recent_messages,
     init_db,
     list_conversations,
@@ -937,6 +938,141 @@ class ChatHandler(BaseHTTPRequestHandler):
             },
         }
 
+    def _handle_regenerate_message(self, payload: dict) -> dict:
+        conversation_id = payload.get("conversation_id")
+
+        try:
+            message_id = int(payload.get("message_id"))
+        except (TypeError, ValueError) as exc:
+            raise ApiError("Invalid message_id") from exc
+
+        if not conversation_id:
+            raise ApiError("Missing conversation_id")
+
+        enable_code_interpreter = bool(payload.get("enable_code_interpreter", True))
+
+        with connect_db() as conn:
+            if not conversation_exists(conn, conversation_id):
+                raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
+
+            assistant_row = get_message_row(conn, conversation_id, message_id)
+            if assistant_row is None:
+                raise ApiError("Message not found", HTTPStatus.NOT_FOUND)
+            if assistant_row["role"] != "assistant":
+                raise ApiError("Only assistant messages can be regenerated")
+
+            user_row = get_previous_user_message_row(conn, conversation_id, message_id)
+            if user_row is None:
+                raise ApiError(
+                    "Could not find the user message for this assistant response",
+                    HTTPStatus.BAD_REQUEST,
+                )
+
+            original_content = str(user_row["content"] or "").strip()
+
+            if original_content.lower().startswith("/image "):
+                raw_image_command = original_content[7:].strip()
+                try:
+                    image_prompt, image_options = parse_image_command(raw_image_command)
+                    image_url = call_openai_image(image_prompt, **image_options)
+                except ValueError as exc:
+                    raise ApiError(str(exc), HTTPStatus.BAD_REQUEST) from exc
+                except Exception as exc:
+                    logger.exception(
+                        "Image regeneration failed for message %s in conversation %s",
+                        message_id,
+                        conversation_id,
+                    )
+                    raise ApiError(
+                        "Image generation failed", HTTPStatus.INTERNAL_SERVER_ERROR
+                    ) from exc
+
+                conn.execute(
+                    "DELETE FROM messages WHERE conversation_id = ? AND id >= ?",
+                    (conversation_id, message_id),
+                )
+
+                assistant_text = f"Generated image:\n\n![Generated image]({image_url})"
+                assistant_id = add_message_returning_id(
+                    conn,
+                    conversation_id,
+                    Message("assistant", assistant_text),
+                )
+                return {
+                    "status": "ok",
+                    "assistant_message": {
+                        "id": assistant_id,
+                        "role": "assistant",
+                        "content": assistant_text,
+                    },
+                    "source_user_message": {
+                        "id": user_row["id"],
+                        "role": "user",
+                        "content": original_content,
+                    },
+                }
+
+            history_rows = get_all_messages_with_ids(conn, conversation_id)
+            history = []
+            for row in history_rows:
+                if row["id"] >= user_row["id"]:
+                    break
+                history.append(Message(row["role"], row["content"]))
+
+            web_search_mode = "off"
+            if original_content.lower().startswith("/web "):
+                web_search_mode = "force"
+            elif bool(payload.get("enable_web_search", True)):
+                web_search_mode = "auto"
+
+            system_prompt = build_system_prompt(conn, original_content or "Regenerate response")
+            user_message = Message("user", user_row["content"])
+            messages = [Message("system", system_prompt), *history, user_message]
+
+            try:
+                response_text = call_openai(
+                    messages,
+                    web_search_mode=web_search_mode,
+                    enable_code_interpreter=enable_code_interpreter,
+                )
+            except ValueError as exc:
+                raise ApiError(str(exc), HTTPStatus.BAD_REQUEST) from exc
+            except Exception as exc:
+                logger.exception(
+                    "Model call failed while regenerating message %s in conversation %s",
+                    message_id,
+                    conversation_id,
+                )
+                raise ApiError(
+                    "Assistant request failed",
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                ) from exc
+
+            conn.execute(
+                "DELETE FROM messages WHERE conversation_id = ? AND id >= ?",
+                (conversation_id, message_id),
+            )
+
+            assistant_id = add_message_returning_id(
+                conn,
+                conversation_id,
+                Message("assistant", response_text),
+            )
+
+        return {
+            "status": "ok",
+            "assistant_message": {
+                "id": assistant_id,
+                "role": "assistant",
+                "content": response_text,
+            },
+            "source_user_message": {
+                "id": user_row["id"],
+                "role": "user",
+                "content": original_content,
+            },
+        }
+
     def _handle_delete_conversation(self, conversation_id: str) -> dict:
         with connect_db() as conn:
             deleted = delete_conversation(conn, conversation_id)
@@ -1125,6 +1261,11 @@ class ChatHandler(BaseHTTPRequestHandler):
             if parts == ["api", "edit"]:
                 payload = self._read_json()
                 self._send_json(self._handle_edit_message(payload))
+                return
+
+            if parts == ["api", "regenerate"]:
+                payload = self._read_json()
+                self._send_json(self._handle_regenerate_message(payload))
                 return
 
             if parts == ["api", "memories"]:
