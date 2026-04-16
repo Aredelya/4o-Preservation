@@ -5,12 +5,21 @@ const state = {
   searchQuery: "",
   isSending: false,
   editingMessageId: null,
+  chatSearchQuery: "",
+  chatSearchMatches: [],
+  activeChatSearchIndex: -1,
 };
 
 let conversationSearchTimer = null;
 let latestMessagesRequest = 0;
 let latestConversationsRequest = 0;
 let statusTimer = null;
+let chatSearchBar = null;
+let chatSearchInput = null;
+let chatSearchPrevBtn = null;
+let chatSearchNextBtn = null;
+let chatSearchClearBtn = null;
+let chatSearchCount = null;
 
 const conversationList = document.getElementById("conversationList");
 const messageList = document.getElementById("messageList");
@@ -166,6 +175,314 @@ const updateConversationActionState = () => {
   if (exportConversationJsonBtn) {
     exportConversationJsonBtn.disabled = disabled;
   }
+};
+
+const escapeRegExp = (value = "") =>
+  String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const clearChatSearchHighlights = (root = messageList) => {
+  if (!root) return;
+
+  const marks = Array.from(root.querySelectorAll("mark.chat-search-hit"));
+  for (const mark of marks) {
+    const parent = mark.parentNode;
+    if (!parent) continue;
+    parent.replaceChild(document.createTextNode(mark.textContent || ""), mark);
+    parent.normalize();
+  }
+
+  state.chatSearchMatches = [];
+  state.activeChatSearchIndex = -1;
+};
+
+const updateChatSearchControls = () => {
+  const total = state.chatSearchMatches.length;
+  const active = total > 0 && state.activeChatSearchIndex >= 0
+    ? state.activeChatSearchIndex + 1
+    : 0;
+
+  if (chatSearchCount) {
+    chatSearchCount.textContent = total ? `${active}/${total}` : "0/0";
+  }
+
+  if (chatSearchPrevBtn) {
+    chatSearchPrevBtn.disabled = total <= 1;
+  }
+
+  if (chatSearchNextBtn) {
+    chatSearchNextBtn.disabled = total <= 1;
+  }
+
+  if (chatSearchClearBtn) {
+    chatSearchClearBtn.disabled = !state.chatSearchQuery.trim();
+  }
+};
+
+const setActiveChatSearchMatch = (index, { scroll = true } = {}) => {
+  const matches = state.chatSearchMatches;
+  if (!matches.length) {
+    state.activeChatSearchIndex = -1;
+    updateChatSearchControls();
+    return;
+  }
+
+  const normalizedIndex = ((index % matches.length) + matches.length) % matches.length;
+  state.activeChatSearchIndex = normalizedIndex;
+
+  matches.forEach((mark, idx) => {
+    mark.classList.toggle("active", idx === normalizedIndex);
+  });
+
+  updateChatSearchControls();
+
+  if (scroll) {
+    const activeMark = matches[normalizedIndex];
+    activeMark?.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+      inline: "nearest",
+    });
+  }
+};
+
+const highlightTextNodeMatches = (textNode, regex) => {
+  const text = textNode.nodeValue || "";
+  regex.lastIndex = 0;
+
+  let match = regex.exec(text);
+  if (!match) return [];
+
+  const fragment = document.createDocumentFragment();
+  const createdMarks = [];
+  let lastIndex = 0;
+
+  while (match) {
+    const start = match.index;
+    const end = start + match[0].length;
+
+    if (start > lastIndex) {
+      fragment.appendChild(document.createTextNode(text.slice(lastIndex, start)));
+    }
+
+    const mark = document.createElement("mark");
+    mark.className = "chat-search-hit";
+    mark.textContent = text.slice(start, end);
+    fragment.appendChild(mark);
+    createdMarks.push(mark);
+
+    lastIndex = end;
+    match = regex.exec(text);
+  }
+
+  if (lastIndex < text.length) {
+    fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+  }
+
+  textNode.parentNode?.replaceChild(fragment, textNode);
+  return createdMarks;
+};
+
+const applyChatSearchHighlights = () => {
+  if (!messageList) return;
+
+  clearChatSearchHighlights(messageList);
+
+  const query = state.chatSearchQuery.trim();
+  if (!query) {
+    updateChatSearchControls();
+    return;
+  }
+
+  const regex = new RegExp(escapeRegExp(query), "gi");
+  const matches = [];
+
+  const bubbles = Array.from(messageList.querySelectorAll(".bubble"));
+  for (const bubble of bubbles) {
+    const walker = document.createTreeWalker(
+      bubble,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode(node) {
+          const value = node.nodeValue || "";
+          if (!value.trim()) return NodeFilter.FILTER_REJECT;
+
+          const parent = node.parentElement;
+          if (!parent) return NodeFilter.FILTER_REJECT;
+
+          if (
+            parent.closest("pre, code, script, style, textarea, button") ||
+            parent.closest("mark.chat-search-hit")
+          ) {
+            return NodeFilter.FILTER_REJECT;
+          }
+
+          return NodeFilter.FILTER_ACCEPT;
+        },
+      },
+    );
+
+    const textNodes = [];
+    let current;
+    while ((current = walker.nextNode())) {
+      textNodes.push(current);
+    }
+
+    for (const textNode of textNodes) {
+      matches.push(...highlightTextNodeMatches(textNode, regex));
+    }
+  }
+
+  state.chatSearchMatches = matches;
+  state.activeChatSearchIndex = matches.length ? 0 : -1;
+
+  if (matches.length) {
+    setActiveChatSearchMatch(0, { scroll: false });
+  } else {
+    updateChatSearchControls();
+  }
+};
+
+const runChatSearch = (query, { scrollToFirst = false } = {}) => {
+  state.chatSearchQuery = String(query || "");
+  applyChatSearchHighlights();
+
+  if (scrollToFirst && state.chatSearchMatches.length) {
+    setActiveChatSearchMatch(0, { scroll: true });
+  } else {
+    updateChatSearchControls();
+  }
+};
+
+const goToNextChatSearchMatch = () => {
+  if (!state.chatSearchMatches.length) return;
+  setActiveChatSearchMatch(state.activeChatSearchIndex + 1);
+};
+
+const goToPreviousChatSearchMatch = () => {
+  if (!state.chatSearchMatches.length) return;
+  setActiveChatSearchMatch(state.activeChatSearchIndex - 1);
+};
+
+const clearChatSearch = () => {
+  state.chatSearchQuery = "";
+  if (chatSearchInput) {
+    chatSearchInput.value = "";
+  }
+  clearChatSearchHighlights(messageList);
+  updateChatSearchControls();
+};
+
+const ensureChatSearchUI = () => {
+  if (chatSearchBar || !messageList) return;
+
+  const style = document.createElement("style");
+  style.textContent = `
+    .chat-search-bar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin: 10px 0 12px;
+    }
+
+    .chat-search-bar input {
+      min-width: 220px;
+      flex: 1 1 220px;
+    }
+
+    .chat-search-count {
+      font-size: 0.9em;
+      opacity: 0.8;
+      min-width: 3.5em;
+      text-align: center;
+    }
+
+    mark.chat-search-hit {
+      background: rgba(255, 230, 120, 0.85);
+      color: inherit;
+      padding: 0 1px;
+      border-radius: 2px;
+    }
+
+    mark.chat-search-hit.active {
+      outline: 2px solid rgba(255, 170, 0, 0.9);
+      background: rgba(255, 200, 80, 0.95);
+    }
+  `;
+  document.head.appendChild(style);
+
+  chatSearchBar = document.createElement("div");
+  chatSearchBar.className = "chat-search-bar";
+
+  chatSearchInput = document.createElement("input");
+  chatSearchInput.type = "search";
+  chatSearchInput.placeholder = "Search this chat";
+  chatSearchInput.autocomplete = "off";
+  chatSearchInput.spellcheck = false;
+
+  chatSearchPrevBtn = document.createElement("button");
+  chatSearchPrevBtn.type = "button";
+  chatSearchPrevBtn.className = "secondary";
+  chatSearchPrevBtn.textContent = "↑";
+
+  chatSearchNextBtn = document.createElement("button");
+  chatSearchNextBtn.type = "button";
+  chatSearchNextBtn.className = "secondary";
+  chatSearchNextBtn.textContent = "↓";
+
+  chatSearchCount = document.createElement("span");
+  chatSearchCount.className = "chat-search-count";
+  chatSearchCount.textContent = "0/0";
+
+  chatSearchClearBtn = document.createElement("button");
+  chatSearchClearBtn.type = "button";
+  chatSearchClearBtn.className = "secondary";
+  chatSearchClearBtn.textContent = "Clear";
+
+  chatSearchInput.addEventListener("input", () => {
+    runChatSearch(chatSearchInput.value);
+  });
+
+  chatSearchInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (event.shiftKey) {
+        goToPreviousChatSearchMatch();
+      } else {
+        goToNextChatSearchMatch();
+      }
+      return;
+    }
+
+    if (event.key === "Escape") {
+      event.preventDefault();
+      clearChatSearch();
+      messageInput?.focus();
+    }
+  });
+
+  chatSearchPrevBtn.onclick = () => goToPreviousChatSearchMatch();
+  chatSearchNextBtn.onclick = () => goToNextChatSearchMatch();
+  chatSearchClearBtn.onclick = () => clearChatSearch();
+
+  chatSearchBar.appendChild(chatSearchInput);
+  chatSearchBar.appendChild(chatSearchPrevBtn);
+  chatSearchBar.appendChild(chatSearchNextBtn);
+  chatSearchBar.appendChild(chatSearchCount);
+  chatSearchBar.appendChild(chatSearchClearBtn);
+
+  const anchor =
+    conversationTitle?.parentElement && conversationTitle.parentElement.contains(messageList)
+      ? conversationTitle
+      : null;
+
+  if (anchor?.parentElement) {
+    anchor.insertAdjacentElement("afterend", chatSearchBar);
+  } else {
+    messageList.parentElement?.insertBefore(chatSearchBar, messageList);
+  }
+
+  updateChatSearchControls();
 };
 
 const downloadConversationExport = async (format) => {
@@ -659,6 +976,8 @@ const renderMessages = (messages = [], autoSnap = true) => {
     messageList.appendChild(createMessageElement(message));
   }
 
+  applyChatSearchHighlights();
+
   if (autoSnap) {
     scheduleMessageBottomSnap();
   }
@@ -752,7 +1071,7 @@ const scrollMessagesToBottom = () => {
 
 const shouldSkipAutoSnap = () => {
   const active = document.activeElement;
-  return active === conversationSearchInput || active === memoryInput;
+  return active === conversationSearchInput || active === memoryInput || active === chatSearchInput;
 };
 
 const scheduleMessageBottomSnap = () => {
@@ -846,6 +1165,7 @@ const selectConversation = async (conversationId) => {
   state.activeConversation = conversationId;
   setEditingState(null);
   clearDraftAttachments();
+  clearChatSearch();
   renderConversations();
   updateConversationActionState();
   await loadMessages(conversationId);
@@ -1110,6 +1430,8 @@ const deleteConversation = async (id) => {
 };
 
 const initializeApp = async () => {
+  ensureChatSearchUI();
+
   try {
     await loadMemories();
   } catch (error) {
