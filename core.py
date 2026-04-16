@@ -440,6 +440,21 @@ def get_message_row(
     ).fetchone()
 
 
+def get_previous_user_message_row(
+    conn: sqlite3.Connection, conversation_id: str, message_id: int
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT id, role, content, created_at
+        FROM messages
+        WHERE conversation_id = ? AND id < ? AND role = 'user'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (conversation_id, message_id),
+    ).fetchone()
+
+
 def replace_message_from_id(
     conn: sqlite3.Connection,
     conversation_id: str,
