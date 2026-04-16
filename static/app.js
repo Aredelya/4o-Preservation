@@ -8,6 +8,8 @@ const state = {
   chatSearchQuery: "",
   chatSearchMatches: [],
   activeChatSearchIndex: -1,
+  activeStreamController: null,
+  activeStreamKind: null,
 };
 
 let conversationSearchTimer = null;
@@ -43,6 +45,7 @@ const closeHistoryBtn = document.getElementById("closeHistory");
 const logoutButton = document.getElementById("logoutButton");
 const exportConversationMarkdownBtn = document.getElementById("exportConversationMarkdown");
 const exportConversationJsonBtn = document.getElementById("exportConversationJson");
+const cancelResponseBtn = document.getElementById("cancelResponseBtn");
 
 const setEditingState = (messageId = null) => {
   state.editingMessageId = messageId;
@@ -100,6 +103,7 @@ const apiStream = async (path, payload, handlers = {}) => {
     headers: { "Content-Type": "application/json" },
     credentials: "same-origin",
     body: JSON.stringify(payload),
+    signal: handlers.signal,
   });
 
   if (response.status === 401) {
@@ -108,7 +112,20 @@ const apiStream = async (path, payload, handlers = {}) => {
   }
 
   if (!response.ok) {
-    const message = await response.text();
+    let message = `HTTP ${response.status}`;
+    try {
+      const body = await response.json();
+      if (body?.error) {
+        message = body.error;
+      }
+    } catch {
+      try {
+        const text = await response.text();
+        if (text) {
+          message = text;
+        }
+      } catch {}
+    }
     throw new Error(message || "Streaming request failed");
   }
 
@@ -120,31 +137,37 @@ const apiStream = async (path, payload, handlers = {}) => {
   const decoder = new TextDecoder();
   let buffer = "";
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
 
-    buffer += decoder.decode(value, { stream: true });
-    const frames = buffer.split("\n\n");
-    buffer = frames.pop() || "";
+      buffer += decoder.decode(value, { stream: true });
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() || "";
 
-    for (const frame of frames) {
-      const lines = frame.split("\n");
-      let dataLine = "";
-      for (const line of lines) {
-        if (line.startsWith("data:")) {
-          dataLine += line.slice(5).trim();
+      for (const frame of frames) {
+        const lines = frame.split("\n");
+        let dataLine = "";
+        for (const line of lines) {
+          if (line.startsWith("data:")) {
+            dataLine += line.slice(5).trim();
+          }
+        }
+        if (!dataLine) continue;
+
+        try {
+          const event = JSON.parse(dataLine);
+          handlers.onEvent?.(event);
+        } catch (error) {
+          console.warn("Failed to parse streaming event:", error);
         }
       }
-      if (!dataLine) continue;
-
-      try {
-        const event = JSON.parse(dataLine);
-        handlers.onEvent?.(event);
-      } catch (error) {
-        console.warn("Failed to parse streaming event:", error);
-      }
     }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {}
   }
 };
 
@@ -166,6 +189,31 @@ const setStatus = (message = "", kind = "", timeoutMs = 0) => {
       statusTimer = null;
     }, timeoutMs);
   }
+};
+const updateCancelResponseButton = () => {
+  if (!cancelResponseBtn) return;
+
+  const isActive = !!state.activeStreamController;
+  cancelResponseBtn.hidden = !isActive;
+  cancelResponseBtn.disabled = !isActive;
+};
+
+const beginActiveStream = (controller, kind = "response") => {
+  state.activeStreamController = controller;
+  state.activeStreamKind = kind;
+  updateCancelResponseButton();
+};
+
+const clearActiveStream = () => {
+  state.activeStreamController = null;
+  state.activeStreamKind = null;
+  updateCancelResponseButton();
+};
+
+const cancelActiveStream = () => {
+  if (!state.activeStreamController) return false;
+  state.activeStreamController.abort();
+  return true;
 };
 const updateConversationActionState = () => {
   const disabled = !state.activeConversation || state.isSending;
@@ -879,6 +927,8 @@ const regenerateAssistantMessage = async (message) => {
 
   try {
     let streamedText = "";
+    const controller = new AbortController();
+    beginActiveStream(controller, "regenerate");
 
     const result = await new Promise((resolve, reject) => {
       apiStream("/api/regenerate-stream", {
@@ -887,6 +937,7 @@ const regenerateAssistantMessage = async (message) => {
         enable_web_search: !!enableWebSearchInput?.checked,
         enable_code_interpreter: !!enableCodeInterpreterInput?.checked,
       }, {
+        signal: controller.signal,
         onEvent: (event) => {
           if (event.type === "delta") {
             streamedText += event.delta || "";
@@ -923,10 +974,18 @@ const regenerateAssistantMessage = async (message) => {
     await loadMessages(state.activeConversation);
     setStatus("Response regenerated.", "", 2200);
   } catch (error) {
+    if (error?.name === "AbortError") {
+      streamingRow.remove();
+      setRowsDimmed(tailRows, false);
+      setStatus("Response canceled.", "", 1800);
+      return;
+    }
+
     streamingRow.remove();
     setRowsDimmed(tailRows, false);
     setStatus(`Failed to regenerate response: ${error.message}`, "error");
   } finally {
+    clearActiveStream();
     setComposerBusy(false);
     messageInput.focus();
   }
@@ -1401,6 +1460,7 @@ const sendMessage = async () => {
   setStatus("");
 
   let pendingBubble = null;
+  let streamedText = "";
 
   try {
     const conversationId = await ensureActiveConversation();
@@ -1478,9 +1538,12 @@ const sendMessage = async () => {
         body: JSON.stringify(requestBody),
       });
     } else {
-      let streamedText = "";
+      const controller = new AbortController();
+      beginActiveStream(controller, "send");
+
       result = await new Promise((resolve, reject) => {
         apiStream("/api/send-stream", requestBody, {
+          signal: controller.signal,
           onEvent: (event) => {
             if (event.type === "delta") {
               streamedText += event.delta || "";
@@ -1509,7 +1572,9 @@ const sendMessage = async () => {
     }
 
     if (pendingBubble) {
-      pendingBubble.innerHTML = renderMarkdown(result.assistant_message?.content || "(No response)");
+      pendingBubble.innerHTML = renderMarkdown(
+        result.assistant_message?.content || streamedText || "(No response)",
+      );
       pendingBubble.classList.remove("pending");
       pendingBubble.classList.remove("error");
     }
@@ -1519,6 +1584,15 @@ const sendMessage = async () => {
     await loadMessages(conversationId);
     setStatus(isEditing ? "Message updated and response regenerated." : "", "", isEditing ? 2500 : 0);
   } catch (error) {
+    if (error?.name === "AbortError") {
+      if (pendingBubble) {
+        pendingBubble.innerHTML = renderMarkdown(streamedText || "Canceled.");
+        pendingBubble.classList.remove("pending");
+      }
+      setStatus("Response canceled.", "", 1800);
+      return;
+    }
+
     if (pendingBubble) {
       pendingBubble.textContent = `Failed to send: ${error.message}`;
       pendingBubble.classList.remove("pending");
@@ -1533,6 +1607,7 @@ const sendMessage = async () => {
 
     setStatus(`Failed to send: ${error.message}`, "error");
   } finally {
+    clearActiveStream();
     setComposerBusy(false);
     messageInput.focus();
   }
@@ -1620,6 +1695,14 @@ newConversationBtn.onclick = async () => {
 sendMessageBtn.onclick = () => {
   void sendMessage();
 };
+if (cancelResponseBtn) {
+  cancelResponseBtn.onclick = () => {
+    const canceled = cancelActiveStream();
+    if (canceled) {
+      setStatus("Response canceled.", "", 1800);
+    }
+  };
+}
 
 saveMemoryBtn.onclick = () => {
   void addMemory();
@@ -1732,6 +1815,17 @@ mobileHistoryMedia.addEventListener("change", () => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (!state.activeStreamController) return;
+
+  const canceled = cancelActiveStream();
+  if (canceled) {
+    event.preventDefault();
+    setStatus("Response canceled.", "", 1800);
+  }
+});
+
+document.addEventListener("keydown", (event) => {
   const isFindShortcut =
     (event.ctrlKey || event.metaKey) &&
     !event.shiftKey &&
@@ -1761,5 +1855,6 @@ document.addEventListener("keydown", (event) => {
 
 initializeApp();
 updateConversationActionState();
+updateCancelResponseButton();
 updateImageCommandHint();
 window.addEventListener("load", scheduleMessageBottomSnap);
