@@ -2,6 +2,10 @@ const state = {
   conversations: [],
   activeConversation: null,
   memories: [],
+  memorySuggestions: [],
+  editingSuggestionId: null,
+  editingSuggestionDraft: null,
+  settings: null,
   searchQuery: "",
   isSending: false,
   editingMessageId: null,
@@ -16,6 +20,7 @@ let conversationSearchTimer = null;
 let latestMessagesRequest = 0;
 let latestConversationsRequest = 0;
 let statusTimer = null;
+let fileSearchStatusPollTimer = null;
 let chatSearchBar = null;
 let chatSearchInput = null;
 let chatSearchPrevBtn = null;
@@ -33,8 +38,15 @@ const newConversationBtn = document.getElementById("newConversation");
 const sendMessageBtn = document.getElementById("sendMessage");
 const enableWebSearchInput = document.getElementById("enableWebSearch");
 const enableCodeInterpreterInput = document.getElementById("enableCodeInterpreter");
+const modelSelect = document.getElementById("modelSelect");
+const enableReasoningInput = document.getElementById("enableReasoning");
+const reasoningEffortSelect = document.getElementById("reasoningEffort");
 const memoryInput = document.getElementById("memoryInput");
+const memoryKindInput = document.getElementById("memoryKind");
+const memoryScopeInput = document.getElementById("memoryScope");
+const memoryPinnedInput = document.getElementById("memoryPinned");
 const saveMemoryBtn = document.getElementById("saveMemory");
+const memorySuggestionsList = document.getElementById("memorySuggestions");
 const memoryList = document.getElementById("memoryList");
 const clearMemoriesBtn = document.getElementById("clearMemories");
 const conversationSearchInput = document.getElementById("conversationSearch");
@@ -47,10 +59,77 @@ const exportConversationMarkdownBtn = document.getElementById("exportConversatio
 const exportConversationJsonBtn = document.getElementById("exportConversationJson");
 const cancelResponseBtn = document.getElementById("cancelResponseBtn");
 
+const MODEL_STORAGE_KEY = "chat-model-selection";
+const REASONING_ENABLED_STORAGE_KEY = "chat-reasoning-enabled";
+const REASONING_EFFORT_STORAGE_KEY = "chat-reasoning-effort";
+
 const setEditingState = (messageId = null) => {
   state.editingMessageId = messageId;
   sendMessageBtn.textContent = messageId ? "Save & resend" : "Send";
 };
+
+const getStoredBoolean = (key, fallback = false) => {
+  const value = window.localStorage.getItem(key);
+  if (value === null) return fallback;
+  return value === "1";
+};
+
+const getStoredString = (key, fallback = "") => {
+  const value = window.localStorage.getItem(key);
+  return value === null ? fallback : value;
+};
+
+const updateReasoningControls = () => {
+  if (!enableReasoningInput || !reasoningEffortSelect) return;
+  const enabled = !!enableReasoningInput.checked;
+  reasoningEffortSelect.disabled = !enabled;
+};
+
+const populateChatSettingsControls = () => {
+  if (!modelSelect || !state.settings) return;
+
+  const settings = state.settings;
+  const storedModel =
+    getStoredString(MODEL_STORAGE_KEY, settings.default_model) || settings.default_model;
+  const selectedReasoningEffort =
+    getStoredString(REASONING_EFFORT_STORAGE_KEY, settings.default_reasoning_effort)
+      || settings.default_reasoning_effort;
+
+  modelSelect.innerHTML = "";
+  for (const model of settings.chat_models || []) {
+    const option = document.createElement("option");
+    option.value = model.id;
+    option.textContent = model.label || model.id;
+    modelSelect.appendChild(option);
+  }
+  const availableModels = [...modelSelect.options].map((option) => option.value);
+  modelSelect.value = availableModels.includes(storedModel)
+    ? storedModel
+    : settings.default_model;
+
+  if (reasoningEffortSelect) {
+    reasoningEffortSelect.innerHTML = "";
+    for (const effort of settings.reasoning_efforts || ["low", "medium", "high"]) {
+      const option = document.createElement("option");
+      option.value = effort;
+      option.textContent = effort.charAt(0).toUpperCase() + effort.slice(1);
+      reasoningEffortSelect.appendChild(option);
+    }
+    reasoningEffortSelect.value = selectedReasoningEffort;
+  }
+
+  if (enableReasoningInput) {
+    enableReasoningInput.checked = getStoredBoolean(REASONING_ENABLED_STORAGE_KEY, false);
+  }
+
+  updateReasoningControls();
+};
+
+const getSelectedChatOptions = () => ({
+  model: modelSelect?.value || state.settings?.default_model || "",
+  enable_reasoning: !!enableReasoningInput?.checked,
+  reasoning_effort: reasoningEffortSelect?.value || state.settings?.default_reasoning_effort || "medium",
+});
 
 const mobileHistoryMedia = window.matchMedia("(max-width: 1100px) and (orientation: portrait)");
 
@@ -208,6 +287,33 @@ const clearActiveStream = () => {
   state.activeStreamController = null;
   state.activeStreamKind = null;
   updateCancelResponseButton();
+};
+
+const clearFileSearchStatusPoll = () => {
+  if (fileSearchStatusPollTimer) {
+    clearTimeout(fileSearchStatusPollTimer);
+    fileSearchStatusPollTimer = null;
+  }
+};
+
+const scheduleFileSearchStatusPoll = (conversationId, messages = []) => {
+  clearFileSearchStatusPoll();
+
+  const hasProcessingStatus = Array.isArray(messages) && messages.some((message) => {
+    if (!message || message.role !== "user" || !message.file_search_status) return false;
+    return String(message.file_search_status.state || "").trim() === "processing";
+  });
+
+  if (!hasProcessingStatus) return;
+  if (!conversationId || conversationId !== state.activeConversation) return;
+  if (state.isSending || state.activeStreamController) return;
+
+  fileSearchStatusPollTimer = setTimeout(() => {
+    if (!state.activeConversation || state.activeConversation !== conversationId) return;
+    loadMessages(conversationId, { autoSnap: false, quietFileSearchRefresh: true }).catch((error) => {
+      console.warn("Failed to refresh file search status:", error);
+    });
+  }, 3500);
 };
 
 const cancelActiveStream = () => {
@@ -421,7 +527,24 @@ const clearChatSearch = () => {
 };
 
 const ensureChatSearchUI = () => {
-  if (chatSearchBar || !messageList) return;
+  if (!messageList) return;
+
+  const isMobileChatLayout = window.matchMedia("(max-width: 760px)").matches;
+
+  if (isMobileChatLayout) {
+    if (chatSearchBar) {
+      chatSearchBar.remove();
+      chatSearchBar = null;
+      chatSearchInput = null;
+      chatSearchPrevBtn = null;
+      chatSearchNextBtn = null;
+      chatSearchClearBtn = null;
+      chatSearchCount = null;
+    }
+    return;
+  }
+
+  if (chatSearchBar) return;
 
   const style = document.createElement("style");
   style.textContent = `
@@ -521,7 +644,7 @@ const ensureChatSearchUI = () => {
 
   const chatSearchIcon = document.createElement("span");
   chatSearchIcon.className = "chat-search-icon";
-  chatSearchIcon.textContent = "🔍";
+  chatSearchIcon.textContent = "/";
   chatSearchIcon.setAttribute("aria-hidden", "true");
 
   chatSearchInput = document.createElement("input");
@@ -534,14 +657,14 @@ const ensureChatSearchUI = () => {
   chatSearchPrevBtn = document.createElement("button");
   chatSearchPrevBtn.type = "button";
   chatSearchPrevBtn.className = "secondary";
-  chatSearchPrevBtn.textContent = "↑";
+  chatSearchPrevBtn.textContent = "Up";
   chatSearchPrevBtn.title = "Previous match";
   chatSearchPrevBtn.setAttribute("aria-label", "Previous match");
 
   chatSearchNextBtn = document.createElement("button");
   chatSearchNextBtn.type = "button";
   chatSearchNextBtn.className = "secondary";
-  chatSearchNextBtn.textContent = "↓";
+  chatSearchNextBtn.textContent = "Down";
   chatSearchNextBtn.title = "Next match";
   chatSearchNextBtn.setAttribute("aria-label", "Next match");
 
@@ -771,7 +894,6 @@ const attachCodeCopyButtons = (bubble) => {
     wrap.appendChild(pre);
   }
 };
-
 const inferImageExtension = (src = "") => {
   if (src.startsWith("data:image/")) {
     const match = src.match(/^data:image\/([a-zA-Z0-9.+-]+);base64,/);
@@ -889,6 +1011,8 @@ const setRowsDimmed = (rows, dimmed) => {
 };
 
 const createStreamingAssistantRow = (content = "Thinking...") => {
+  ensureFileSearchStatusStyles();
+
   const row = document.createElement("div");
   row.className = "message-row assistant";
 
@@ -900,7 +1024,10 @@ const createStreamingAssistantRow = (content = "Thinking...") => {
   });
 
   row.appendChild(bubble);
-  return { row, bubble };
+  const activityTimeline = createActivityTimeline();
+  row.appendChild(activityTimeline.container);
+
+  return { row, bubble, activityTimeline };
 };
 
 const regenerateAssistantMessage = async (message) => {
@@ -914,7 +1041,11 @@ const regenerateAssistantMessage = async (message) => {
   const tailRows = getTailRowsFromMessageId(message.id);
   setRowsDimmed(tailRows, true);
 
-  const { row: streamingRow, bubble: streamingBubble } = createStreamingAssistantRow("Thinking...");
+  const {
+    row: streamingRow,
+    bubble: streamingBubble,
+    activityTimeline,
+  } = createStreamingAssistantRow("Thinking...");
   const anchorRow = tailRows.length ? tailRows[tailRows.length - 1] : getMessageRowById(message.id);
 
   if (anchorRow?.parentNode) {
@@ -936,6 +1067,7 @@ const regenerateAssistantMessage = async (message) => {
         message_id: message.id,
         enable_web_search: !!enableWebSearchInput?.checked,
         enable_code_interpreter: !!enableCodeInterpreterInput?.checked,
+        ...getSelectedChatOptions(),
       }, {
         signal: controller.signal,
         onEvent: (event) => {
@@ -949,6 +1081,15 @@ const regenerateAssistantMessage = async (message) => {
             const statusText = String(event.status || "").replaceAll("_", " ");
             if (statusText) {
               setStatus(`Tool progress: ${statusText}...`, "", 2500);
+            }
+            return;
+          }
+
+          if (event.type === "activity") {
+            appendActivityEntry(activityTimeline, event.activity);
+            const summary = String(event.activity?.summary || "").trim();
+            if (summary) {
+              setStatus(summary, "", 2500);
             }
             return;
           }
@@ -1110,6 +1251,339 @@ const renderMarkdown = (content = "") => {
   return html.join("");
 };
 
+const ensureFileSearchStatusStyles = () => {
+  if (document.getElementById("fileSearchStatusStyles")) return;
+
+  const style = document.createElement("style");
+  style.id = "fileSearchStatusStyles";
+  style.textContent = `
+    .message-meta-row {
+      display: flex;
+      justify-content: flex-start;
+      margin-top: 6px;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .file-search-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      line-height: 1.2;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.04);
+      color: rgba(255, 255, 255, 0.82);
+      max-width: min(100%, 34rem);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .file-search-chip::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      flex: 0 0 auto;
+      background: #7d8792;
+    }
+
+    .file-search-chip.completed::before {
+      background: #58c472;
+    }
+
+    .file-search-chip.processing::before {
+      background: #f0b54a;
+    }
+
+    .file-search-chip.failed::before {
+      background: #ef6b6b;
+    }
+
+    .file-search-chip.partial::before {
+      background: #6fb4ff;
+    }
+
+    .used-tools-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .used-tool-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      line-height: 1.2;
+      border: 1px solid rgba(120, 196, 255, 0.18);
+      background: rgba(67, 123, 204, 0.14);
+      color: rgba(222, 236, 255, 0.9);
+      white-space: nowrap;
+    }
+
+    .assistant-model-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .assistant-model-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      line-height: 1.2;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: rgba(255, 255, 255, 0.06);
+      color: rgba(255, 255, 255, 0.86);
+      white-space: nowrap;
+    }
+
+    .activity-timeline {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-width: min(78ch, 84%);
+      margin-top: 2px;
+    }
+
+    .activity-timeline[hidden] {
+      display: none;
+    }
+
+    .activity-timeline-title {
+      font-size: 0.76rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: rgba(255, 255, 255, 0.54);
+      padding-left: 2px;
+    }
+
+    .activity-timeline-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .activity-entry {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 10px;
+      border-radius: 12px;
+      font-size: 0.84rem;
+      line-height: 1.35;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.04);
+      color: rgba(255, 255, 255, 0.84);
+    }
+
+    .activity-entry::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      flex: 0 0 auto;
+      background: #7d8792;
+    }
+
+    .activity-entry.running::before {
+      background: #f0b54a;
+    }
+
+    .activity-entry.completed::before {
+      background: #58c472;
+    }
+
+    .activity-entry.failed::before {
+      background: #ef6b6b;
+    }
+
+    .activity-entry-tool {
+      font-weight: 600;
+      color: rgba(225, 235, 255, 0.94);
+    }
+
+    .activity-entry-summary {
+      color: rgba(255, 255, 255, 0.8);
+    }
+  `;
+  document.head.appendChild(style);
+};
+
+const buildFileSearchStatusText = (status) => {
+  if (!status || typeof status !== "object") return "";
+
+  const label = String(status.label || "").trim();
+  if (!label) return "";
+
+  const parts = [label];
+  const total = Number(status.total || 0);
+  const completed = Number(status.completed || 0);
+  const failed = Number(status.failed || 0);
+  const processing = Number(status.processing || 0);
+  const missing = Number(status.missing || 0);
+
+  if (total > 1) {
+    parts.push(`${completed}/${total}`);
+  }
+
+  if (processing > 0) {
+    parts.push(`${processing} pending`);
+  } else if (failed > 0 && completed > 0) {
+    parts.push(`${failed} failed`);
+  } else if (failed > 0 && !completed) {
+    parts.push(`${failed} failed`);
+  } else if (missing > 0) {
+    parts.push(`${missing} missing`);
+  }
+
+  return parts.join(" · ");
+};
+
+const getToolDisplayLabel = (toolKey) => {
+  const labelMap = {
+    web: "Web",
+    github: "GitHub",
+    files: "File Search",
+    python: "Python",
+  };
+  const key = String(toolKey || "").trim().toLowerCase();
+  return labelMap[key] || key.replaceAll("_", " ").trim() || "Tool";
+};
+
+const normalizeToolsUsed = (toolsUsed) => {
+  if (!Array.isArray(toolsUsed)) return [];
+
+  const normalized = [];
+  const seen = new Set();
+  for (const rawTool of toolsUsed) {
+    const key = String(rawTool || "").trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    normalized.push({ key, label: getToolDisplayLabel(key) });
+  }
+
+  return normalized;
+};
+
+const normalizeAssistantModelInfo = (message) => {
+  if (!message || message.role !== "assistant") return [];
+
+  const chips = [];
+  const actualModel = String(message.model || "").trim();
+  const requestedModel = String(message.requested_model || "").trim();
+  const reasoningEnabled = !!message.reasoning_enabled;
+  const reasoningEffort = String(message.reasoning_effort || "").trim();
+
+  if (actualModel) {
+    chips.push({
+      label: actualModel,
+      title: requestedModel && requestedModel !== actualModel
+        ? `Requested ${requestedModel}; used ${actualModel}`
+        : `Used ${actualModel}`,
+    });
+  }
+
+  if (reasoningEnabled) {
+    const label = reasoningEffort ? `Reasoning: ${reasoningEffort}` : "Reasoning";
+    chips.push({
+      label,
+      title: reasoningEffort
+        ? `Reasoning mode enabled (${reasoningEffort})`
+        : "Reasoning mode enabled",
+    });
+  }
+
+  return chips;
+};
+
+const normalizeActivityLog = (activityLog) => {
+  if (!Array.isArray(activityLog)) return [];
+
+  const normalized = [];
+  for (const rawEntry of activityLog) {
+    if (!rawEntry || typeof rawEntry !== "object") continue;
+
+    const tool = String(rawEntry.tool || "").trim().toLowerCase();
+    const label = String(rawEntry.label || "").trim() || getToolDisplayLabel(tool);
+    const state = String(rawEntry.state || "running").trim().toLowerCase() || "running";
+    const summary = String(rawEntry.summary || "").trim();
+
+    normalized.push({
+      tool,
+      label,
+      state: ["running", "completed", "failed"].includes(state) ? state : "running",
+      summary,
+    });
+  }
+
+  return normalized;
+};
+
+const createActivityTimeline = () => {
+  ensureFileSearchStatusStyles();
+
+  const container = document.createElement("div");
+  container.className = "activity-timeline";
+  container.hidden = true;
+
+  const title = document.createElement("div");
+  title.className = "activity-timeline-title";
+  title.textContent = "Activity";
+
+  const list = document.createElement("div");
+  list.className = "activity-timeline-list";
+
+  container.appendChild(title);
+  container.appendChild(list);
+  return { container, list };
+};
+
+const appendActivityEntry = (timeline, activity) => {
+  if (!timeline?.container || !timeline?.list || !activity || typeof activity !== "object") {
+    return;
+  }
+
+  const tool = String(activity.tool || "").trim().toLowerCase();
+  const state = String(activity.state || "running").trim().toLowerCase() || "running";
+  const summary = String(activity.summary || "").trim();
+  if (!tool && !summary) return;
+
+  timeline.container.hidden = false;
+
+  const entry = document.createElement("div");
+  entry.className = `activity-entry ${state}`;
+
+  const toolLabel = document.createElement("span");
+  toolLabel.className = "activity-entry-tool";
+  toolLabel.textContent = getToolDisplayLabel(tool || activity.label || "");
+
+  const summaryLabel = document.createElement("span");
+  summaryLabel.className = "activity-entry-summary";
+  summaryLabel.textContent = summary || `${toolLabel.textContent} step`;
+
+  entry.appendChild(toolLabel);
+  entry.appendChild(summaryLabel);
+  timeline.list.appendChild(entry);
+  scheduleMessageBottomSnap();
+};
+
+const populateActivityTimeline = (timeline, activityLog = []) => {
+  const normalizedLog = normalizeActivityLog(activityLog);
+  if (!normalizedLog.length) return;
+
+  for (const entry of normalizedLog) {
+    appendActivityEntry(timeline, entry);
+  }
+};
+
 const createBubble = ({ role, content, extraClass = "", id = "" }) => {
   const bubble = document.createElement("div");
   bubble.className = `bubble ${role}${extraClass ? ` ${extraClass}` : ""}`;
@@ -1124,6 +1598,8 @@ const createBubble = ({ role, content, extraClass = "", id = "" }) => {
 };
 
 const createMessageElement = (message) => {
+  ensureFileSearchStatusStyles();
+
   const wrap = document.createElement("div");
   wrap.className = `message-row ${message.role}`;
 
@@ -1177,6 +1653,78 @@ const createMessageElement = (message) => {
     wrap.appendChild(actions);
   }
 
+  if (message.role === "assistant") {
+    const activityLog = normalizeActivityLog(message.activity_log);
+    if (activityLog.length) {
+      const persistedActivityTimeline = createActivityTimeline();
+      populateActivityTimeline(persistedActivityTimeline, activityLog);
+      wrap.appendChild(persistedActivityTimeline.container);
+    }
+  }
+
+  if (message.role === "user" && message.file_search_status) {
+    const chipText = buildFileSearchStatusText(message.file_search_status);
+    if (chipText) {
+      const metaRow = document.createElement("div");
+      metaRow.className = "message-meta-row";
+
+      const chip = document.createElement("div");
+      const statusState = String(message.file_search_status.state || "processing").trim() || "processing";
+      chip.className = `file-search-chip ${statusState}`;
+      chip.textContent = chipText;
+
+      const filenames = Array.isArray(message.file_search_status.filenames)
+        ? message.file_search_status.filenames.filter(Boolean).join(", ")
+        : "";
+      const errorText = String(message.file_search_status.error || "").trim();
+      const titleParts = [];
+      if (filenames) titleParts.push(filenames);
+      if (errorText) titleParts.push(errorText);
+      if (titleParts.length) {
+        chip.title = titleParts.join("\n");
+      }
+
+      metaRow.appendChild(chip);
+      wrap.appendChild(metaRow);
+    }
+  }
+
+  if (message.role === "assistant") {
+    const modelChips = normalizeAssistantModelInfo(message);
+    if (modelChips.length) {
+      const metaRow = document.createElement("div");
+      metaRow.className = "message-meta-row assistant-model-row";
+
+      for (const modelChip of modelChips) {
+        const chip = document.createElement("div");
+        chip.className = "assistant-model-chip";
+        chip.textContent = modelChip.label;
+        if (modelChip.title) {
+          chip.title = modelChip.title;
+        }
+        metaRow.appendChild(chip);
+      }
+
+      wrap.appendChild(metaRow);
+    }
+
+    const toolsUsed = normalizeToolsUsed(message.tools_used);
+    if (toolsUsed.length) {
+      const metaRow = document.createElement("div");
+      metaRow.className = "message-meta-row used-tools-row";
+
+      for (const tool of toolsUsed) {
+        const chip = document.createElement("div");
+        chip.className = "used-tool-chip";
+        chip.textContent = tool.label;
+        chip.title = `Used ${tool.label}`;
+        metaRow.appendChild(chip);
+      }
+
+      wrap.appendChild(metaRow);
+    }
+  }
+
   return wrap;
 };
 
@@ -1222,7 +1770,7 @@ const renderConversations = () => {
 
     const remove = document.createElement("button");
     remove.className = "danger";
-    remove.textContent = "✕";
+    remove.textContent = "×";
     remove.type = "button";
     remove.title = "Delete conversation";
     remove.setAttribute("aria-label", "Delete conversation");
@@ -1244,6 +1792,11 @@ const renderConversations = () => {
 
 const renderMemories = () => {
   memoryList.innerHTML = "";
+  const titleCase = (value = "") =>
+    String(value)
+      .replaceAll("_", " ")
+      .trim()
+      .replace(/\b\w/g, (match) => match.toUpperCase());
 
   for (const memory of state.memories) {
     const card = document.createElement("div");
@@ -1252,9 +1805,33 @@ const renderMemories = () => {
     const text = document.createElement("div");
     text.textContent = memory.content;
 
+    const tags = document.createElement("div");
+    tags.className = "memory-tags";
+
+    const tagValues = [
+      titleCase(memory.kind || "note"),
+      memory.scope === "conversation" ? "Current chat" : "Global",
+    ];
+    if (memory.pinned) {
+      tagValues.push("Pinned");
+    }
+    if (memory.source && memory.source !== "user") {
+      tagValues.push(titleCase(memory.source));
+    }
+
+    for (const tagValue of tagValues) {
+      const chip = document.createElement("span");
+      chip.className = "memory-tag";
+      chip.textContent = tagValue;
+      tags.appendChild(chip);
+    }
+
     const meta = document.createElement("div");
     meta.className = "muted";
     meta.textContent = `#${memory.id} · ${memory.created_at}`;
+    const confidence = Number(memory.confidence);
+    const confidenceText = Number.isFinite(confidence) ? ` · confidence ${confidence.toFixed(2)}` : "";
+    meta.textContent = `#${memory.id} · ${memory.created_at}${confidenceText}`;
 
     const actions = document.createElement("div");
     actions.className = "memory-actions";
@@ -1272,6 +1849,7 @@ const renderMemories = () => {
 
     actions.appendChild(remove);
     card.appendChild(text);
+    card.appendChild(tags);
     card.appendChild(meta);
     card.appendChild(actions);
     memoryList.appendChild(card);
@@ -1312,7 +1890,8 @@ const scheduleMessageBottomSnap = () => {
   });
 };
 
-const loadMessages = async (conversationId) => {
+const loadMessages = async (conversationId, options = {}) => {
+  const { autoSnap = true, quietFileSearchRefresh = false } = options;
   const requestId = ++latestMessagesRequest;
   const data = await api(`/api/conversations/${conversationId}`);
 
@@ -1328,7 +1907,241 @@ const loadMessages = async (conversationId) => {
     setEditingState(null);
   }
 
-  renderMessages(data.messages);
+  renderMessages(data.messages, autoSnap);
+  scheduleFileSearchStatusPoll(conversationId, data.messages);
+
+  if (!quietFileSearchRefresh) {
+    const hasProcessingStatus = Array.isArray(data.messages) && data.messages.some((message) => {
+      if (!message || message.role !== "user" || !message.file_search_status) return false;
+      return String(message.file_search_status.state || "").trim() === "processing";
+    });
+    if (hasProcessingStatus) {
+      setStatus("File search indexing is still running...", "", 1800);
+    }
+  }
+};
+
+const renderMemorySuggestions = () => {
+  if (!memorySuggestionsList) return;
+  memorySuggestionsList.innerHTML = "";
+
+  const titleCase = (value = "") =>
+    String(value)
+      .replaceAll("_", " ")
+      .trim()
+      .replace(/\b\w/g, (match) => match.toUpperCase());
+
+  const suggestions = Array.isArray(state.memorySuggestions) ? state.memorySuggestions : [];
+  if (!suggestions.length) {
+    memorySuggestionsList.hidden = true;
+    return;
+  }
+
+  memorySuggestionsList.hidden = false;
+
+  const heading = document.createElement("div");
+  heading.className = "muted";
+  heading.textContent = "Suggested memories";
+  memorySuggestionsList.appendChild(heading);
+
+  for (const suggestion of suggestions) {
+    const card = document.createElement("div");
+    card.className = "memory-item suggestion-item";
+
+    const isEditing = state.editingSuggestionId === suggestion.id;
+
+    if (isEditing) {
+      const draft = state.editingSuggestionDraft || {
+        content: suggestion.content,
+        kind: suggestion.kind || "note",
+        scope: suggestion.scope || "global",
+        pinned: !!suggestion.pinned,
+      };
+
+      const editor = document.createElement("div");
+      editor.className = "suggestion-editor";
+
+      const editorInput = document.createElement("textarea");
+      editorInput.className = "suggestion-editor-input";
+      editorInput.value = draft.content || "";
+      editorInput.rows = 3;
+      editorInput.placeholder = "Edit suggested memory...";
+      editorInput.oninput = () => {
+        state.editingSuggestionDraft = {
+          ...draft,
+          content: editorInput.value,
+          kind: editorKind.value,
+          scope: editorScope.value,
+          pinned: !!editorPinned.checked,
+        };
+      };
+
+      const editorControls = document.createElement("div");
+      editorControls.className = "memory-controls suggestion-editor-controls";
+
+      const editorKind = document.createElement("select");
+      editorKind.innerHTML = `
+        <option value="note">General note</option>
+        <option value="preference">Preference</option>
+        <option value="project">Project fact</option>
+        <option value="task">Task / goal</option>
+        <option value="fact">Fact</option>
+        <option value="identity">Identity</option>
+      `;
+      editorKind.value = draft.kind || "note";
+
+      const editorScope = document.createElement("select");
+      editorScope.innerHTML = `
+        <option value="global">Global</option>
+        <option value="conversation">Current chat</option>
+      `;
+      editorScope.value = draft.scope || "global";
+
+      const editorPinnedLabel = document.createElement("label");
+      editorPinnedLabel.className = "search-toggle memory-pin-toggle";
+      const editorPinned = document.createElement("input");
+      editorPinned.type = "checkbox";
+      editorPinned.checked = !!draft.pinned;
+      editorPinnedLabel.appendChild(editorPinned);
+      editorPinnedLabel.append(" Pin");
+
+      const syncDraft = () => {
+        state.editingSuggestionDraft = {
+          content: editorInput.value,
+          kind: editorKind.value,
+          scope: editorScope.value,
+          pinned: !!editorPinned.checked,
+        };
+      };
+
+      editorKind.onchange = syncDraft;
+      editorScope.onchange = syncDraft;
+      editorPinned.onchange = syncDraft;
+
+      editorControls.appendChild(editorKind);
+      editorControls.appendChild(editorScope);
+      editorControls.appendChild(editorPinnedLabel);
+
+      const meta = document.createElement("div");
+      meta.className = "muted";
+      const confidence = Number(suggestion.confidence);
+      const confidenceText = Number.isFinite(confidence) ? ` · confidence ${confidence.toFixed(2)}` : "";
+      meta.textContent = `#${suggestion.id} · ${suggestion.created_at}${confidenceText}`;
+
+      const actions = document.createElement("div");
+      actions.className = "memory-actions";
+
+      const save = document.createElement("button");
+      save.textContent = "Save";
+      save.type = "button";
+      save.className = "primary";
+      save.onclick = async () => {
+        try {
+          syncDraft();
+          const nextDraft = { ...(state.editingSuggestionDraft || draft) };
+          await updateMemorySuggestion(suggestion.id, nextDraft);
+          state.editingSuggestionId = null;
+          state.editingSuggestionDraft = null;
+          await loadMemories();
+          setStatus("Memory suggestion updated.", "", 2000);
+        } catch (error) {
+          setStatus(`Failed to update suggestion: ${error.message}`, "error");
+        }
+      };
+
+      const cancel = document.createElement("button");
+      cancel.textContent = "Cancel";
+      cancel.type = "button";
+      cancel.onclick = () => {
+        state.editingSuggestionId = null;
+        state.editingSuggestionDraft = null;
+        renderMemorySuggestions();
+      };
+
+      actions.appendChild(save);
+      actions.appendChild(cancel);
+      editor.appendChild(editorInput);
+      card.appendChild(editor);
+      card.appendChild(editorControls);
+      card.appendChild(meta);
+      card.appendChild(actions);
+    } else {
+      const text = document.createElement("div");
+      text.textContent = suggestion.content;
+
+      const tags = document.createElement("div");
+      tags.className = "memory-tags";
+      const tagValues = [
+        titleCase(suggestion.kind || "note"),
+        suggestion.scope === "conversation" ? "Current chat" : "Global",
+        suggestion.pinned ? "Pinned" : "",
+        "Suggested",
+      ].filter(Boolean);
+
+      for (const tagValue of tagValues) {
+        const chip = document.createElement("span");
+        chip.className = "memory-tag";
+        chip.textContent = tagValue;
+        tags.appendChild(chip);
+      }
+
+      const meta = document.createElement("div");
+      meta.className = "muted";
+      const confidence = Number(suggestion.confidence);
+      const confidenceText = Number.isFinite(confidence) ? ` · confidence ${confidence.toFixed(2)}` : "";
+      meta.textContent = `#${suggestion.id} · ${suggestion.created_at}${confidenceText}`;
+
+      const actions = document.createElement("div");
+      actions.className = "memory-actions";
+
+      const edit = document.createElement("button");
+      edit.textContent = "Edit";
+      edit.type = "button";
+      edit.onclick = () => {
+        state.editingSuggestionId = suggestion.id;
+        state.editingSuggestionDraft = {
+          content: suggestion.content,
+          kind: suggestion.kind || "note",
+          scope: suggestion.scope || "global",
+          pinned: !!suggestion.pinned,
+        };
+        renderMemorySuggestions();
+      };
+
+      const accept = document.createElement("button");
+      accept.textContent = "Accept";
+      accept.type = "button";
+      accept.className = "primary";
+      accept.onclick = async () => {
+        try {
+          await acceptMemorySuggestion(suggestion.id);
+        } catch (error) {
+          setStatus(`Failed to accept suggestion: ${error.message}`, "error");
+        }
+      };
+
+      const reject = document.createElement("button");
+      reject.textContent = "Reject";
+      reject.type = "button";
+      reject.onclick = async () => {
+        try {
+          await rejectMemorySuggestion(suggestion.id);
+        } catch (error) {
+          setStatus(`Failed to reject suggestion: ${error.message}`, "error");
+        }
+      };
+
+      actions.appendChild(edit);
+      actions.appendChild(accept);
+      actions.appendChild(reject);
+      card.appendChild(text);
+      card.appendChild(tags);
+      card.appendChild(meta);
+      card.appendChild(actions);
+    }
+
+    memorySuggestionsList.appendChild(card);
+  }
 };
 
 const loadConversations = async ({ refreshMessages = true } = {}) => {
@@ -1374,12 +2187,28 @@ const loadConversations = async ({ refreshMessages = true } = {}) => {
 const loadMemories = async () => {
   const data = await api("/api/memories");
   state.memories = data.memories;
+  state.memorySuggestions = data.suggestions || [];
+  if (
+    state.editingSuggestionId &&
+    !state.memorySuggestions.some((suggestion) => suggestion.id === state.editingSuggestionId)
+  ) {
+    state.editingSuggestionId = null;
+    state.editingSuggestionDraft = null;
+  }
+  renderMemorySuggestions();
   renderMemories();
+};
+
+const loadSettings = async () => {
+  const data = await api("/api/settings");
+  state.settings = data || null;
+  populateChatSettingsControls();
 };
 
 const selectConversation = async (conversationId) => {
   if (state.isSending) return;
 
+  clearFileSearchStatusPoll();
   state.activeConversation = conversationId;
   setEditingState(null);
   clearDraftAttachments();
@@ -1393,6 +2222,7 @@ const selectConversation = async (conversationId) => {
 const createConversation = async () => {
   if (state.isSending) return;
 
+  clearFileSearchStatusPoll();
   const data = await api("/api/conversations", { method: "POST" });
   setEditingState(null);
   updateConversationActionState();
@@ -1417,31 +2247,93 @@ const buildAttachmentSummary = (files) => {
   return `[Attached: ${files.map((file) => file.name).join(", ")}]`;
 };
 
+const TEXT_ATTACHMENT_EXTENSIONS = new Set([
+  ".txt",
+  ".md",
+  ".markdown",
+  ".csv",
+  ".tsv",
+  ".json",
+  ".jsonl",
+  ".py",
+  ".js",
+  ".ts",
+  ".tsx",
+  ".jsx",
+  ".html",
+  ".htm",
+  ".css",
+  ".xml",
+  ".yaml",
+  ".yml",
+  ".log",
+  ".toml",
+  ".ini",
+  ".cfg",
+  ".sql",
+]);
+
+const getFileExtension = (filename = "") => {
+  const lastDot = filename.lastIndexOf(".");
+  return lastDot >= 0 ? filename.slice(lastDot).toLowerCase() : "";
+};
+
+const readFileAsDataURL = (file, label) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error(`Failed to read ${label}: ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+
+const isTextLikeAttachment = (file) => {
+  const extension = getFileExtension(file.name);
+  if (TEXT_ATTACHMENT_EXTENSIONS.has(extension)) return true;
+
+  const mimeType = String(file.type || "").toLowerCase();
+  return (
+    mimeType.startsWith("text/") ||
+    mimeType === "application/json" ||
+    mimeType === "application/xml"
+  );
+};
+
 const readAttachments = async (files) => {
   const attachments = [];
 
   for (const file of files) {
     if (file.type.startsWith("image/")) {
-      const dataUrl = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = () => reject(new Error(`Failed to read image: ${file.name}`));
-        reader.readAsDataURL(file);
-      });
+      const dataUrl = await readFileAsDataURL(file, "image");
 
       attachments.push({
         kind: "image",
         name: file.name,
         data_url: dataUrl,
       });
-    } else {
+      continue;
+    }
+
+    if (isTextLikeAttachment(file)) {
       const text = await file.text();
       attachments.push({
         kind: "text",
         name: file.name,
         text,
       });
+      continue;
     }
+
+    if (getFileExtension(file.name) === ".pdf" || file.type === "application/pdf") {
+      const dataUrl = await readFileAsDataURL(file, "file");
+      attachments.push({
+        kind: "file",
+        name: file.name,
+        data_url: dataUrl,
+      });
+      continue;
+    }
+
+    throw new Error(`Unsupported attachment type: ${file.name}. Use images, text-like files, or PDFs.`);
   }
 
   return attachments;
@@ -1460,6 +2352,7 @@ const sendMessage = async () => {
   setStatus("");
 
   let pendingBubble = null;
+  let pendingActivityTimeline = null;
   let streamedText = "";
 
   try {
@@ -1508,12 +2401,11 @@ const sendMessage = async () => {
       });
     }
 
-    pendingBubble = appendMessageBubble({
-      role: "assistant",
-      content: "Thinking...",
-      extraClass: "pending",
-      id: `pending-${Date.now()}`,
-    });
+    const pendingAssistant = createStreamingAssistantRow("Thinking...");
+    pendingBubble = pendingAssistant.bubble;
+    pendingActivityTimeline = pendingAssistant.activityTimeline;
+    messageList.appendChild(pendingAssistant.row);
+    scheduleMessageBottomSnap();
 
     const requestPath = isEditing ? "/api/edit" : "/api/send";
     const requestBody = {
@@ -1522,6 +2414,7 @@ const sendMessage = async () => {
       attachments,
       enable_web_search: !!enableWebSearchInput?.checked,
       enable_code_interpreter: !!enableCodeInterpreterInput?.checked,
+      ...getSelectedChatOptions(),
     };
 
     if (isEditing) {
@@ -1559,6 +2452,14 @@ const sendMessage = async () => {
               }
               return;
             }
+            if (event.type === "activity") {
+              appendActivityEntry(pendingActivityTimeline, event.activity);
+              const summary = String(event.activity?.summary || "").trim();
+              if (summary) {
+                setStatus(summary, "", 2500);
+              }
+              return;
+            }
             if (event.type === "error") {
               reject(new Error(event.error || "Streaming request failed"));
               return;
@@ -1582,6 +2483,7 @@ const sendMessage = async () => {
     setEditingState(null);
     await loadConversations({ refreshMessages: false });
     await loadMessages(conversationId);
+    await loadMemories();
     setStatus(isEditing ? "Message updated and response regenerated." : "", "", isEditing ? 2500 : 0);
   } catch (error) {
     if (error?.name === "AbortError") {
@@ -1617,13 +2519,25 @@ const addMemory = async () => {
   const content = memoryInput.value.trim();
   if (!content) return;
 
-  memoryInput.value = "";
-
   try {
+    const scope = String(memoryScopeInput?.value || "global").trim().toLowerCase() || "global";
+    if (scope === "conversation" && !state.activeConversation) {
+      throw new Error("Open a conversation before saving a current-chat memory.");
+    }
     await api("/api/memories", {
       method: "POST",
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({
+        content,
+        kind: memoryKindInput?.value || "note",
+        scope,
+        pinned: !!memoryPinnedInput?.checked,
+        conversation_id: scope === "conversation" ? state.activeConversation : "",
+      }),
     });
+    memoryInput.value = "";
+    if (memoryKindInput) memoryKindInput.value = "note";
+    if (memoryScopeInput) memoryScopeInput.value = "global";
+    if (memoryPinnedInput) memoryPinnedInput.checked = false;
     await loadMemories();
     setStatus("Memory saved.", "", 2000);
   } catch (error) {
@@ -1635,6 +2549,39 @@ const deleteMemory = async (id) => {
   await api(`/api/memories/${id}`, { method: "DELETE" });
   await loadMemories();
   setStatus("Memory deleted.", "", 2000);
+};
+
+const acceptMemorySuggestion = async (id) => {
+  await api(`/api/memory-suggestions/${id}/accept`, { method: "POST" });
+  if (state.editingSuggestionId === id) {
+    state.editingSuggestionId = null;
+    state.editingSuggestionDraft = null;
+  }
+  await loadMemories();
+  setStatus("Memory suggestion accepted.", "", 2000);
+};
+
+const rejectMemorySuggestion = async (id) => {
+  await api(`/api/memory-suggestions/${id}`, { method: "DELETE" });
+  if (state.editingSuggestionId === id) {
+    state.editingSuggestionId = null;
+    state.editingSuggestionDraft = null;
+  }
+  await loadMemories();
+  setStatus("Memory suggestion rejected.", "", 2000);
+};
+
+const updateMemorySuggestion = async (id, draft) => {
+  await api(`/api/memory-suggestions/${id}/update`, {
+    method: "POST",
+    body: JSON.stringify({
+      content: String(draft?.content || "").trim(),
+      kind: draft?.kind || "note",
+      scope: draft?.scope || "global",
+      pinned: !!draft?.pinned,
+      conversation_id: draft?.scope === "conversation" ? (state.activeConversation || "") : "",
+    }),
+  });
 };
 
 const clearMemories = async () => {
@@ -1653,6 +2600,7 @@ const deleteConversation = async (id) => {
   await api(`/api/conversations/${id}`, { method: "DELETE" });
 
   if (state.activeConversation === id) {
+    clearFileSearchStatusPoll();
     state.activeConversation = null;
     conversationTitle.textContent = "Chat";
     renderMessages([], false);
@@ -1664,7 +2612,15 @@ const deleteConversation = async (id) => {
 };
 
 const initializeApp = async () => {
+  clearFileSearchStatusPoll();
   ensureChatSearchUI();
+
+  try {
+    await loadSettings();
+  } catch (error) {
+    console.error("Failed to load settings:", error);
+    setStatus(`Failed to load settings: ${error.message}`, "error");
+  }
 
   try {
     await loadMemories();
@@ -1702,6 +2658,25 @@ if (cancelResponseBtn) {
       setStatus("Response canceled.", "", 1800);
     }
   };
+}
+
+if (modelSelect) {
+  modelSelect.addEventListener("change", () => {
+    window.localStorage.setItem(MODEL_STORAGE_KEY, modelSelect.value || "");
+  });
+}
+
+if (enableReasoningInput) {
+  enableReasoningInput.addEventListener("change", () => {
+    window.localStorage.setItem(REASONING_ENABLED_STORAGE_KEY, enableReasoningInput.checked ? "1" : "0");
+    updateReasoningControls();
+  });
+}
+
+if (reasoningEffortSelect) {
+  reasoningEffortSelect.addEventListener("change", () => {
+    window.localStorage.setItem(REASONING_EFFORT_STORAGE_KEY, reasoningEffortSelect.value || "medium");
+  });
 }
 
 saveMemoryBtn.onclick = () => {
@@ -1845,12 +2820,19 @@ document.addEventListener("keydown", (event) => {
     return;
   }
 
-  if (!state.activeConversation || !chatSearchInput) return;
+  if (!state.activeConversation) return;
+
+  ensureChatSearchUI();
+
+  if (!chatSearchInput) return;
 
   event.preventDefault();
-  ensureChatSearchUI();
   chatSearchInput.focus();
   chatSearchInput.select();
+});
+
+window.addEventListener("resize", () => {
+  ensureChatSearchUI();
 });
 
 initializeApp();
@@ -1858,3 +2840,168 @@ updateConversationActionState();
 updateCancelResponseButton();
 updateImageCommandHint();
 window.addEventListener("load", scheduleMessageBottomSnap);
+
+/* --- Mobile drawer polish: memories drawer + backdrop + mutual exclusion --- */
+(() => {
+  const memoryToggleBtnMobileUi = document.getElementById("memoryToggle");
+  const closeMemoriesBtnMobileUi = document.getElementById("closeMemories");
+  const backdropMobileUi = document.getElementById("mobileDrawerBackdrop");
+  const memoryPanelMobileUi = document.getElementById("memoryPanel");
+
+  if (!memoryToggleBtnMobileUi || !closeMemoriesBtnMobileUi || !backdropMobileUi || !memoryPanelMobileUi) {
+    return;
+  }
+
+  const mobileDrawerMediaMobileUi = window.matchMedia("(max-width: 1100px) and (orientation: portrait)");
+
+  const isMobileDrawerModeMobileUi = () => mobileDrawerMediaMobileUi.matches;
+
+  const syncMobileDrawersMobileUi = () => {
+    const historyOpen = document.body.classList.contains("mobile-history-open") && isMobileDrawerModeMobileUi();
+    const memoriesOpen = document.body.classList.contains("mobile-memories-open") && isMobileDrawerModeMobileUi();
+    const anyOpen = historyOpen || memoriesOpen;
+
+    backdropMobileUi.hidden = !anyOpen;
+
+    if (historyToggleBtn) {
+      historyToggleBtn.setAttribute("aria-expanded", historyOpen ? "true" : "false");
+    }
+
+    memoryToggleBtnMobileUi.setAttribute("aria-expanded", memoriesOpen ? "true" : "false");
+  };
+
+  const closeAllMobileDrawersMobileUi = () => {
+    document.body.classList.remove("mobile-history-open", "mobile-memories-open");
+    syncMobileDrawersMobileUi();
+  };
+
+  const setMobileMemoriesOpenMobileUi = (open) => {
+    const shouldOpen = open && isMobileDrawerModeMobileUi();
+    document.body.classList.toggle("mobile-memories-open", shouldOpen);
+
+    if (shouldOpen) {
+      document.body.classList.remove("mobile-history-open");
+    }
+
+    syncMobileDrawersMobileUi();
+  };
+
+  const toggleMobileMemoriesMobileUi = () => {
+    if (!isMobileDrawerModeMobileUi()) return;
+    const willOpen = !document.body.classList.contains("mobile-memories-open");
+    setMobileMemoriesOpenMobileUi(willOpen);
+  };
+
+  memoryToggleBtnMobileUi.addEventListener("click", () => {
+    toggleMobileMemoriesMobileUi();
+  });
+
+  closeMemoriesBtnMobileUi.addEventListener("click", () => {
+    setMobileMemoriesOpenMobileUi(false);
+  });
+
+  backdropMobileUi.addEventListener("click", () => {
+    closeAllMobileDrawersMobileUi();
+  });
+
+  if (historyToggleBtn) {
+    historyToggleBtn.addEventListener("click", () => {
+      document.body.classList.remove("mobile-memories-open");
+      setTimeout(syncMobileDrawersMobileUi, 0);
+    });
+  }
+
+  if (closeHistoryBtn) {
+    closeHistoryBtn.addEventListener("click", () => {
+      setTimeout(syncMobileDrawersMobileUi, 0);
+    });
+  }
+
+  if (conversationList) {
+    conversationList.addEventListener("click", () => {
+      if (isMobileDrawerModeMobileUi()) {
+        setTimeout(syncMobileDrawersMobileUi, 0);
+      }
+    });
+  }
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closeAllMobileDrawersMobileUi();
+    }
+  });
+
+  const bodyObserverMobileUi = new MutationObserver(() => {
+    syncMobileDrawersMobileUi();
+  });
+
+  bodyObserverMobileUi.observe(document.body, {
+    attributes: true,
+    attributeFilter: ["class"]
+  });
+
+  const handleViewportChangeMobileUi = () => {
+    if (!isMobileDrawerModeMobileUi()) {
+      closeAllMobileDrawersMobileUi();
+    } else {
+      syncMobileDrawersMobileUi();
+    }
+  };
+
+  if (typeof mobileDrawerMediaMobileUi.addEventListener === "function") {
+    mobileDrawerMediaMobileUi.addEventListener("change", handleViewportChangeMobileUi);
+  } else if (typeof mobileDrawerMediaMobileUi.addListener === "function") {
+    mobileDrawerMediaMobileUi.addListener(handleViewportChangeMobileUi);
+  }
+
+  syncMobileDrawersMobileUi();
+})();
+
+/* --- Mobile composer tools collapse --- */
+(() => {
+  const toggleComposerToolsBtn = document.getElementById("toggleComposerTools");
+  const composerTools = document.getElementById("composerTools");
+
+  if (!toggleComposerToolsBtn || !composerTools) return;
+
+  const mobileComposerMedia = window.matchMedia("(max-width: 760px)");
+
+  const isPhoneLayout = () => mobileComposerMedia.matches;
+
+  const setComposerToolsOpen = (open) => {
+    const shouldOpen = !!open && isPhoneLayout();
+    composerTools.classList.toggle("open", shouldOpen);
+    toggleComposerToolsBtn.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+    toggleComposerToolsBtn.textContent = shouldOpen ? "Hide tools" : "Tools";
+  };
+
+  const resetComposerTools = () => {
+    composerTools.classList.remove("open");
+    toggleComposerToolsBtn.setAttribute("aria-expanded", "false");
+    toggleComposerToolsBtn.textContent = "Tools";
+  };
+
+  toggleComposerToolsBtn.addEventListener("click", () => {
+    if (!isPhoneLayout()) return;
+    setComposerToolsOpen(!composerTools.classList.contains("open"));
+  });
+
+  const handleComposerViewportChange = () => {
+    if (!isPhoneLayout()) {
+      composerTools.classList.remove("open");
+      toggleComposerToolsBtn.setAttribute("aria-expanded", "false");
+      toggleComposerToolsBtn.textContent = "Tools";
+    } else {
+      resetComposerTools();
+    }
+  };
+
+  if (typeof mobileComposerMedia.addEventListener === "function") {
+    mobileComposerMedia.addEventListener("change", handleComposerViewportChange);
+  } else if (typeof mobileComposerMedia.addListener === "function") {
+    mobileComposerMedia.addListener(handleComposerViewportChange);
+  }
+
+  handleComposerViewportChange();
+})();
+
