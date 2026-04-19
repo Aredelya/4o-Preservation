@@ -16,34 +16,51 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from core import (
+    AVAILABLE_CHAT_MODELS,
+    DEFAULT_REASONING_EFFORT,
+    DEFAULT_REASONING_MODEL,
     ENV_PATH,
     Message,
+    REASONING_EFFORT_OPTIONS,
+    accept_memory_suggestion,
     add_memory,
     add_message,
     add_message_returning_id,
+    auto_extract_memory_suggestions_from_user_text,
     build_system_prompt,
     build_user_content,
     call_openai,
     call_openai_image,
     clear_memories,
+    cleanup_orphaned_attachments,
     connect_db,
     conversation_exists,
     create_conversation,
     delete_conversation,
     delete_memory,
+    delete_memory_suggestion,
+    delete_memory_suggestions_from_message_id,
     fetch_container_file_content,
     get_all_messages_with_ids,
     get_conversation_title,
+    get_message_file_search_status,
     get_message_row,
     get_previous_user_message_row,
     get_recent_messages,
     init_db,
     list_conversations,
     list_memories,
+    list_memory_suggestions,
     load_env_file,
+    message_from_row,
+    normalize_chat_model,
+    reasoning_model_supported,
     replace_message_from_id,
+    resolve_chat_settings,
     search_conversations,
     stream_openai,
+    summarize_content,
+    update_memory_suggestion,
     update_conversation_title,
 )
 
@@ -55,9 +72,10 @@ PORT = int(os.environ.get("CHATBOT_WEB_PORT", "8000"))
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 
-MAX_BODY_SIZE = 5 * 1024 * 1024
+MAX_BODY_SIZE = 30 * 1024 * 1024
 MAX_ATTACHMENTS = 8
 MAX_TEXT_ATTACHMENT_CHARS = 200_000
+MAX_BINARY_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
 WEB_PASSWORD = os.environ.get("CHATBOT_WEB_PASSWORD", "").strip()
 WEB_PASSWORD_HASH = os.environ.get("CHATBOT_WEB_PASSWORD_HASH", "").strip().lower()
@@ -187,6 +205,23 @@ def parse_image_command(raw_command: str) -> tuple[str, dict]:
         options["output_format"] = output_format
 
     return prompt, options
+
+
+def parse_data_url(data_url: str) -> tuple[str, str]:
+    if not isinstance(data_url, str) or not data_url.startswith("data:") or "," not in data_url:
+        raise ValueError("Invalid data URL")
+
+    header, encoded = data_url.split(",", 1)
+    mime_type = header[5:].split(";", 1)[0].strip() or "application/octet-stream"
+    if ";base64" not in header.lower():
+        raise ValueError("Only base64 data URLs are supported")
+
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except Exception as exc:
+        raise ValueError("Attachment is not valid base64") from exc
+
+    return mime_type, base64.b64encode(raw).decode("ascii")
 
 def auth_enabled() -> bool:
     return bool(WEB_PASSWORD or WEB_PASSWORD_HASH)
@@ -442,10 +477,57 @@ class ChatHandler(BaseHTTPRequestHandler):
                     )
                 validated.append({"kind": "text", "name": name, "text": text})
 
+            elif kind == "file":
+                data_url = item.get("data_url")
+                if not isinstance(data_url, str):
+                    raise ApiError(f"Attachment '{name}' must contain a data URL")
+                try:
+                    mime_type, file_data = parse_data_url(data_url)
+                except ValueError as exc:
+                    raise ApiError(f"Attachment '{name}' is not a valid file upload") from exc
+                if mime_type != "application/pdf" and not name.lower().endswith(".pdf"):
+                    raise ApiError(f"Attachment '{name}' must be a PDF")
+                binary_size = (len(file_data) * 3) // 4
+                if binary_size > MAX_BINARY_ATTACHMENT_BYTES:
+                    raise ApiError(
+                        f"Attachment '{name}' is too large "
+                        f"(max {MAX_BINARY_ATTACHMENT_BYTES // (1024 * 1024)} MB)"
+                    )
+                validated.append(
+                    {
+                        "kind": "file",
+                        "name": name,
+                        "file_data": file_data,
+                        "mime_type": mime_type,
+                    }
+                )
+
             else:
                 raise ApiError(f"Unsupported attachment kind for '{name}'")
 
         return validated
+
+    def _build_user_message(self, content: str, attachments: list[dict]) -> Message:
+        image_data_urls = [
+            attachment["data_url"]
+            for attachment in attachments
+            if attachment["kind"] == "image"
+        ]
+        file_texts = [
+            (attachment["name"], attachment["text"])
+            for attachment in attachments
+            if attachment["kind"] == "text"
+        ]
+        file_inputs = [
+            {
+                "filename": attachment["name"],
+                "file_data": attachment["file_data"],
+            }
+            for attachment in attachments
+            if attachment["kind"] == "file"
+        ]
+        user_content = build_user_content(content or None, image_data_urls, file_texts, file_inputs)
+        return Message("user", user_content)
     
     def _list_conversations(self, query: str) -> dict:
         with connect_db() as conn:
@@ -477,15 +559,25 @@ class ChatHandler(BaseHTTPRequestHandler):
                 raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
 
             title = get_conversation_title(conn, conversation_id)
-            messages = [
-                {
-                    "id": row["id"],
-                    "role": row["role"],
-                    "content": row["content"],
-                    "created_at": row["created_at"],
-                }
-                for row in get_all_messages_with_ids(conn, conversation_id)
-            ]
+            messages = []
+            for row in get_all_messages_with_ids(conn, conversation_id):
+                message = message_from_row(row)
+                metadata = message.metadata or {}
+                messages.append(
+                    {
+                        "id": row["id"],
+                        "role": row["role"],
+                        "content": row["content"],
+                        "tools_used": list(metadata.get("tools_used") or []),
+                        "activity_log": list(metadata.get("activity_log") or []),
+                        "model": str(metadata.get("model") or "").strip(),
+                        "requested_model": str(metadata.get("requested_model") or "").strip(),
+                        "reasoning_enabled": bool(metadata.get("reasoning_enabled", False)),
+                        "reasoning_effort": str(metadata.get("reasoning_effort") or "").strip(),
+                        "file_search_status": get_message_file_search_status(conn, row["raw_content"]),
+                        "created_at": row["created_at"],
+                    }
+                )
 
         return {"title": title, "messages": messages}
     
@@ -569,10 +661,72 @@ class ChatHandler(BaseHTTPRequestHandler):
     def _list_memories(self) -> dict:
         with connect_db() as conn:
             memories = [
-                {"id": mem_id, "content": content, "created_at": created_at}
-                for mem_id, content, created_at in list_memories(conn)
+                {
+                    "id": memory.id,
+                    "content": memory.content,
+                    "kind": memory.kind,
+                    "scope": memory.scope,
+                    "scope_key": memory.scope_key,
+                    "source": memory.source,
+                    "confidence": memory.confidence,
+                    "pinned": memory.pinned,
+                    "created_at": memory.created_at,
+                    "updated_at": memory.updated_at,
+                }
+                for memory in list_memories(conn)
             ]
-        return {"memories": memories}
+            suggestions = [
+                {
+                    "id": suggestion.id,
+                    "content": suggestion.content,
+                    "kind": suggestion.kind,
+                    "scope": suggestion.scope,
+                    "scope_key": suggestion.scope_key,
+                    "source_message_id": suggestion.source_message_id,
+                    "source": suggestion.source,
+                    "confidence": suggestion.confidence,
+                    "pinned": suggestion.pinned,
+                    "created_at": suggestion.created_at,
+                    "updated_at": suggestion.updated_at,
+                }
+                for suggestion in list_memory_suggestions(conn)
+            ]
+        return {"memories": memories, "suggestions": suggestions}
+
+    def _get_client_settings(self) -> dict:
+        models = []
+        for model in AVAILABLE_CHAT_MODELS:
+            models.append(
+                {
+                    "id": model,
+                    "label": model,
+                    "supports_reasoning": reasoning_model_supported(model),
+                }
+            )
+        return {
+            "chat_models": models,
+            "default_model": normalize_chat_model(None),
+            "default_reasoning_model": DEFAULT_REASONING_MODEL,
+            "default_reasoning_effort": DEFAULT_REASONING_EFFORT,
+            "reasoning_efforts": list(REASONING_EFFORT_OPTIONS),
+        }
+
+    def _resolve_chat_options(self, payload: dict) -> dict:
+        return resolve_chat_settings(
+            payload.get("model"),
+            enable_reasoning=bool(payload.get("enable_reasoning", False)),
+            reasoning_effort=payload.get("reasoning_effort"),
+        )
+
+    def _assistant_metadata(self, response_text, chat_options: dict) -> dict:
+        return {
+            "tools_used": response_text.tools_used,
+            "activity_log": response_text.activity_log,
+            "model": response_text.model,
+            "requested_model": chat_options.get("requested_model") or response_text.model,
+            "reasoning_enabled": bool(chat_options.get("reasoning_enabled")),
+            "reasoning_effort": response_text.reasoning_effort,
+        }
 
     def _handle_create_conversation(self) -> dict:
         with connect_db() as conn:
@@ -584,10 +738,127 @@ class ChatHandler(BaseHTTPRequestHandler):
         if not content:
             raise ApiError("Missing memory content")
 
+        kind = (payload.get("kind") or "note").strip().lower()
+        scope = (payload.get("scope") or "global").strip().lower()
+        source = (payload.get("source") or "user").strip().lower()
+        pinned = bool(payload.get("pinned", False))
+        confidence = payload.get("confidence", 1.0)
+        conversation_id = (payload.get("conversation_id") or "").strip()
+        scope_key = conversation_id if scope == "conversation" else (payload.get("scope_key") or "").strip()
+
+        if scope == "conversation" and not scope_key:
+            raise ApiError("Conversation-scoped memories require a conversation_id")
+
         with connect_db() as conn:
-            add_memory(conn, content)
+            if scope == "conversation" and not conversation_exists(conn, scope_key):
+                raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
+            add_memory(
+                conn,
+                content,
+                kind=kind,
+                scope=scope,
+                scope_key=scope_key,
+                source=source,
+                confidence=confidence,
+                pinned=pinned,
+            )
 
         return {"status": "ok"}
+
+    def _handle_accept_memory_suggestion(self, suggestion_id_str: str) -> dict:
+        try:
+            suggestion_id = int(suggestion_id_str)
+        except ValueError as exc:
+            raise ApiError("Invalid suggestion id") from exc
+
+        with connect_db() as conn:
+            accepted = accept_memory_suggestion(conn, suggestion_id)
+        if accepted is None:
+            raise ApiError("Suggestion not found", HTTPStatus.NOT_FOUND)
+
+        return {
+            "status": "ok",
+            "memory": {
+                "id": accepted.id,
+                "content": accepted.content,
+                "kind": accepted.kind,
+                "scope": accepted.scope,
+                "scope_key": accepted.scope_key,
+                "source": accepted.source,
+                "confidence": accepted.confidence,
+                "pinned": accepted.pinned,
+                "created_at": accepted.created_at,
+                "updated_at": accepted.updated_at,
+            },
+        }
+
+    def _handle_delete_memory_suggestion(self, suggestion_id_str: str) -> dict:
+        try:
+            suggestion_id = int(suggestion_id_str)
+        except ValueError as exc:
+            raise ApiError("Invalid suggestion id") from exc
+
+        with connect_db() as conn:
+            deleted = delete_memory_suggestion(conn, suggestion_id)
+        return {"deleted": deleted}
+
+    def _handle_update_memory_suggestion(self, suggestion_id_str: str, payload: dict) -> dict:
+        try:
+            suggestion_id = int(suggestion_id_str)
+        except ValueError as exc:
+            raise ApiError("Invalid suggestion id") from exc
+
+        content = re.sub(r"\s+", " ", str(payload.get("content") or "")).strip()
+        if not content:
+            raise ApiError("Missing suggestion content")
+
+        kind = (payload.get("kind") or "note").strip().lower()
+        scope = (payload.get("scope") or "global").strip().lower()
+        pinned = bool(payload.get("pinned", False))
+        conversation_id = (payload.get("conversation_id") or "").strip()
+
+        with connect_db() as conn:
+            existing = next((item for item in list_memory_suggestions(conn) if item.id == suggestion_id), None)
+            if existing is None:
+                raise ApiError("Suggestion not found", HTTPStatus.NOT_FOUND)
+
+            scope_key = ""
+            if scope == "conversation":
+                scope_key = conversation_id or existing.scope_key
+                if not scope_key:
+                    raise ApiError("Conversation-scoped suggestions require a conversation_id")
+                if not conversation_exists(conn, scope_key):
+                    raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
+
+            updated = update_memory_suggestion(
+                conn,
+                suggestion_id,
+                content=content,
+                kind=kind,
+                scope=scope,
+                scope_key=scope_key,
+                pinned=pinned,
+            )
+
+        if updated is None:
+            raise ApiError("Suggestion not found", HTTPStatus.NOT_FOUND)
+
+        return {
+            "status": "ok",
+            "suggestion": {
+                "id": updated.id,
+                "content": updated.content,
+                "kind": updated.kind,
+                "scope": updated.scope,
+                "scope_key": updated.scope_key,
+                "source_message_id": updated.source_message_id,
+                "source": updated.source,
+                "confidence": updated.confidence,
+                "pinned": updated.pinned,
+                "created_at": updated.created_at,
+                "updated_at": updated.updated_at,
+            },
+        }
 
     def _handle_update_title(self, payload: dict) -> dict:
         conversation_id = payload.get("conversation_id")
@@ -659,41 +930,42 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         web_search_mode = "off"
         enable_code_interpreter = bool(payload.get("enable_code_interpreter", True))
+        chat_options = self._resolve_chat_options(payload)
         if content.lower().startswith("/web "):
             web_search_mode = "force"
             content = content[5:].strip()
         elif bool(payload.get("enable_web_search", True)):
             web_search_mode = "auto"
 
-        image_data_urls = [
-            attachment["data_url"]
-            for attachment in attachments
-            if attachment["kind"] == "image"
-        ]
-        file_texts = [
-            (attachment["name"], attachment["text"])
-            for attachment in attachments
-            if attachment["kind"] == "text"
-        ]
-
-        user_content = build_user_content(content or None, image_data_urls, file_texts)
-        user_message = Message("user", user_content)
+        user_message = self._build_user_message(content, attachments)
 
         with connect_db() as conn:
             if not conversation_exists(conn, conversation_id):
                 raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
 
             history = get_recent_messages(conn, conversation_id)
-            system_prompt = build_system_prompt(conn, content or "Attachment upload")
+            system_prompt = build_system_prompt(
+                conn,
+                content or "Attachment upload",
+                conversation_id=conversation_id,
+            )
             messages = [Message("system", system_prompt), *history, user_message]
 
-            add_message(conn, conversation_id, user_message)
+            user_message_id = add_message_returning_id(conn, conversation_id, user_message)
+            auto_extract_memory_suggestions_from_user_text(
+                conn,
+                content,
+                conversation_id=conversation_id,
+                source_message_id=user_message_id,
+            )
 
             try:
                 response_text = call_openai(
                     messages,
                     web_search_mode=web_search_mode,
                     enable_code_interpreter=enable_code_interpreter,
+                    model=chat_options["model"],
+                    reasoning_effort=chat_options["reasoning_effort"],
                 )
             except Exception as exc:
                 logger.exception("Model call failed for conversation %s", conversation_id)
@@ -702,13 +974,27 @@ class ChatHandler(BaseHTTPRequestHandler):
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                 ) from exc
 
-            add_message(conn, conversation_id, Message("assistant", response_text))
+            add_message(
+                conn,
+                conversation_id,
+                Message(
+                    "assistant",
+                    response_text.text,
+                    self._assistant_metadata(response_text, chat_options),
+                ),
+            )
 
         return {
             "status": "ok",
             "assistant_message": {
                 "role": "assistant",
-                "content": response_text,
+                "content": response_text.text,
+                "tools_used": response_text.tools_used,
+                "activity_log": response_text.activity_log,
+                "model": response_text.model,
+                "requested_model": chat_options["requested_model"],
+                "reasoning_enabled": chat_options["reasoning_enabled"],
+                "reasoning_effort": response_text.reasoning_effort,
             },
         }
 
@@ -731,34 +1017,33 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         web_search_mode = "off"
         enable_code_interpreter = bool(payload.get("enable_code_interpreter", True))
+        chat_options = self._resolve_chat_options(payload)
         if content.lower().startswith("/web "):
             web_search_mode = "force"
             content = content[5:].strip()
         elif bool(payload.get("enable_web_search", True)):
             web_search_mode = "auto"
 
-        image_data_urls = [
-            attachment["data_url"]
-            for attachment in attachments
-            if attachment["kind"] == "image"
-        ]
-        file_texts = [
-            (attachment["name"], attachment["text"])
-            for attachment in attachments
-            if attachment["kind"] == "text"
-        ]
-
-        user_content = build_user_content(content or None, image_data_urls, file_texts)
-        user_message = Message("user", user_content)
+        user_message = self._build_user_message(content, attachments)
 
         with connect_db() as conn:
             if not conversation_exists(conn, conversation_id):
                 raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
 
             history = get_recent_messages(conn, conversation_id)
-            system_prompt = build_system_prompt(conn, content or "Attachment upload")
+            system_prompt = build_system_prompt(
+                conn,
+                content or "Attachment upload",
+                conversation_id=conversation_id,
+            )
             messages = [Message("system", system_prompt), *history, user_message]
-            add_message(conn, conversation_id, user_message)
+            user_message_id = add_message_returning_id(conn, conversation_id, user_message)
+            auto_extract_memory_suggestions_from_user_text(
+                conn,
+                content,
+                conversation_id=conversation_id,
+                source_message_id=user_message_id,
+            )
 
             self._send_sse_headers()
 
@@ -768,6 +1053,8 @@ class ChatHandler(BaseHTTPRequestHandler):
                     messages,
                     web_search_mode=web_search_mode,
                     enable_code_interpreter=enable_code_interpreter,
+                    model=chat_options["model"],
+                    reasoning_effort=chat_options["reasoning_effort"],
                 ):
                     event_type = event.get("type")
                     if event_type == "text_delta":
@@ -780,15 +1067,46 @@ class ChatHandler(BaseHTTPRequestHandler):
                         status = str(event.get("status") or "").strip()
                         if status:
                             self._send_sse_event({"type": "status", "status": status})
+                    elif event_type == "activity":
+                        activity = event.get("activity")
+                        if isinstance(activity, dict):
+                            self._send_sse_event({"type": "activity", "activity": activity})
                     elif event_type == "done":
                         final_text = str(event.get("text") or full_text)
-                        add_message(conn, conversation_id, Message("assistant", final_text))
+                        tools_used = list(event.get("tools_used") or [])
+                        activity_log = list(event.get("activity_log") or [])
+                        resolved_model = str(event.get("model") or chat_options["model"]).strip() or chat_options["model"]
+                        response_reasoning_effort = str(
+                            event.get("reasoning_effort") or chat_options["reasoning_effort"] or ""
+                        ).strip() or None
+                        add_message(
+                            conn,
+                            conversation_id,
+                            Message(
+                                "assistant",
+                                final_text,
+                                {
+                                    "tools_used": tools_used,
+                                    "activity_log": activity_log,
+                                    "model": resolved_model,
+                                    "requested_model": chat_options["requested_model"],
+                                    "reasoning_enabled": chat_options["reasoning_enabled"],
+                                    "reasoning_effort": response_reasoning_effort,
+                                },
+                            ),
+                        )
                         self._send_sse_event(
                             {
                                 "type": "done",
                                 "assistant_message": {
                                     "role": "assistant",
                                     "content": final_text,
+                                    "tools_used": tools_used,
+                                    "activity_log": activity_log,
+                                    "model": resolved_model,
+                                    "requested_model": chat_options["requested_model"],
+                                    "reasoning_enabled": chat_options["reasoning_enabled"],
+                                    "reasoning_effort": response_reasoning_effort,
                                 },
                             }
                         )
@@ -858,25 +1176,14 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         web_search_mode = "off"
         enable_code_interpreter = bool(payload.get("enable_code_interpreter", True))
+        chat_options = self._resolve_chat_options(payload)
         if content.lower().startswith("/web "):
             web_search_mode = "force"
             content = content[5:].strip()
         elif bool(payload.get("enable_web_search", True)):
             web_search_mode = "auto"
 
-        image_data_urls = [
-            attachment["data_url"]
-            for attachment in attachments
-            if attachment["kind"] == "image"
-        ]
-        file_texts = [
-            (attachment["name"], attachment["text"])
-            for attachment in attachments
-            if attachment["kind"] == "text"
-        ]
-
-        user_content = build_user_content(content or None, image_data_urls, file_texts)
-        user_message = Message("user", user_content)
+        user_message = self._build_user_message(content, attachments)
 
         with connect_db() as conn:
             if not conversation_exists(conn, conversation_id):
@@ -893,17 +1200,29 @@ class ChatHandler(BaseHTTPRequestHandler):
             for row in history_rows:
                 if row["id"] >= message_id:
                     break
-                history.append(Message(row["role"], row["content"]))
+                history.append(message_from_row(row))
 
-            system_prompt = build_system_prompt(conn, content or "Attachment upload")
+            system_prompt = build_system_prompt(
+                conn,
+                content or "Attachment upload",
+                conversation_id=conversation_id,
+            )
             messages = [Message("system", system_prompt), *history, user_message]
 
             try:
                 replace_message_from_id(conn, conversation_id, message_id, user_message)
+                auto_extract_memory_suggestions_from_user_text(
+                    conn,
+                    content,
+                    conversation_id=conversation_id,
+                    source_message_id=message_id,
+                )
                 response_text = call_openai(
                     messages,
                     web_search_mode=web_search_mode,
                     enable_code_interpreter=enable_code_interpreter,
+                    model=chat_options["model"],
+                    reasoning_effort=chat_options["reasoning_effort"],
                 )
             except ValueError as exc:
                 raise ApiError(str(exc), HTTPStatus.BAD_REQUEST) from exc
@@ -921,7 +1240,11 @@ class ChatHandler(BaseHTTPRequestHandler):
             assistant_id = add_message_returning_id(
                 conn,
                 conversation_id,
-                Message("assistant", response_text),
+                Message(
+                    "assistant",
+                    response_text.text,
+                    self._assistant_metadata(response_text, chat_options),
+                ),
             )
 
         return {
@@ -929,12 +1252,18 @@ class ChatHandler(BaseHTTPRequestHandler):
             "edited_message": {
                 "id": message_id,
                 "role": "user",
-                "content": user_message.content if isinstance(user_message.content, str) else "",
+                "content": summarize_content(user_message.content),
             },
             "assistant_message": {
                 "id": assistant_id,
                 "role": "assistant",
-                "content": response_text,
+                "content": response_text.text,
+                "tools_used": response_text.tools_used,
+                "activity_log": response_text.activity_log,
+                "model": response_text.model,
+                "requested_model": chat_options["requested_model"],
+                "reasoning_enabled": chat_options["reasoning_enabled"],
+                "reasoning_effort": response_text.reasoning_effort,
             },
         }
 
@@ -950,6 +1279,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             raise ApiError("Missing conversation_id")
 
         enable_code_interpreter = bool(payload.get("enable_code_interpreter", True))
+        chat_options = self._resolve_chat_options(payload)
 
         with connect_db() as conn:
             if not conversation_exists(conn, conversation_id):
@@ -969,6 +1299,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 )
 
             original_content = str(user_row["content"] or "").strip()
+            original_user_message = message_from_row(user_row)
 
             if original_content.lower().startswith("/image "):
                 raw_image_command = original_content[7:].strip()
@@ -991,6 +1322,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                     "DELETE FROM messages WHERE conversation_id = ? AND id >= ?",
                     (conversation_id, message_id),
                 )
+                cleanup_orphaned_attachments(conn)
 
                 assistant_text = f"Generated image:\n\n![Generated image]({image_url})"
                 assistant_id = add_message_returning_id(
@@ -1017,7 +1349,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             for row in history_rows:
                 if row["id"] >= user_row["id"]:
                     break
-                history.append(Message(row["role"], row["content"]))
+                history.append(message_from_row(row))
 
             web_search_mode = "off"
             if original_content.lower().startswith("/web "):
@@ -1025,15 +1357,20 @@ class ChatHandler(BaseHTTPRequestHandler):
             elif bool(payload.get("enable_web_search", True)):
                 web_search_mode = "auto"
 
-            system_prompt = build_system_prompt(conn, original_content or "Regenerate response")
-            user_message = Message("user", user_row["content"])
-            messages = [Message("system", system_prompt), *history, user_message]
+            system_prompt = build_system_prompt(
+                conn,
+                original_content or "Regenerate response",
+                conversation_id=conversation_id,
+            )
+            messages = [Message("system", system_prompt), *history, original_user_message]
 
             try:
                 response_text = call_openai(
                     messages,
                     web_search_mode=web_search_mode,
                     enable_code_interpreter=enable_code_interpreter,
+                    model=chat_options["model"],
+                    reasoning_effort=chat_options["reasoning_effort"],
                 )
             except ValueError as exc:
                 raise ApiError(str(exc), HTTPStatus.BAD_REQUEST) from exc
@@ -1052,11 +1389,17 @@ class ChatHandler(BaseHTTPRequestHandler):
                 "DELETE FROM messages WHERE conversation_id = ? AND id >= ?",
                 (conversation_id, message_id),
             )
+            delete_memory_suggestions_from_message_id(conn, conversation_id, message_id, include_current=True)
+            cleanup_orphaned_attachments(conn)
 
             assistant_id = add_message_returning_id(
                 conn,
                 conversation_id,
-                Message("assistant", response_text),
+                Message(
+                    "assistant",
+                    response_text.text,
+                    self._assistant_metadata(response_text, chat_options),
+                ),
             )
 
         return {
@@ -1064,7 +1407,13 @@ class ChatHandler(BaseHTTPRequestHandler):
             "assistant_message": {
                 "id": assistant_id,
                 "role": "assistant",
-                "content": response_text,
+                "content": response_text.text,
+                "tools_used": response_text.tools_used,
+                "activity_log": response_text.activity_log,
+                "model": response_text.model,
+                "requested_model": chat_options["requested_model"],
+                "reasoning_enabled": chat_options["reasoning_enabled"],
+                "reasoning_effort": response_text.reasoning_effort,
             },
             "source_user_message": {
                 "id": user_row["id"],
@@ -1084,6 +1433,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             raise ApiError("Missing conversation_id")
 
         enable_code_interpreter = bool(payload.get("enable_code_interpreter", True))
+        chat_options = self._resolve_chat_options(payload)
 
         with connect_db() as conn:
             if not conversation_exists(conn, conversation_id):
@@ -1103,6 +1453,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 )
 
             original_content = str(user_row["content"] or "").strip()
+            original_user_message = message_from_row(user_row)
 
             if original_content.lower().startswith("/image "):
                 result = self._handle_regenerate_message(payload)
@@ -1121,7 +1472,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             for row in history_rows:
                 if row["id"] >= user_row["id"]:
                     break
-                history.append(Message(row["role"], row["content"]))
+                history.append(message_from_row(row))
 
             web_search_mode = "off"
             if original_content.lower().startswith("/web "):
@@ -1129,9 +1480,12 @@ class ChatHandler(BaseHTTPRequestHandler):
             elif bool(payload.get("enable_web_search", True)):
                 web_search_mode = "auto"
 
-            system_prompt = build_system_prompt(conn, original_content or "Regenerate response")
-            user_message = Message("user", user_row["content"])
-            messages = [Message("system", system_prompt), *history, user_message]
+            system_prompt = build_system_prompt(
+                conn,
+                original_content or "Regenerate response",
+                conversation_id=conversation_id,
+            )
+            messages = [Message("system", system_prompt), *history, original_user_message]
 
             self._send_sse_headers()
 
@@ -1141,6 +1495,8 @@ class ChatHandler(BaseHTTPRequestHandler):
                     messages,
                     web_search_mode=web_search_mode,
                     enable_code_interpreter=enable_code_interpreter,
+                    model=chat_options["model"],
+                    reasoning_effort=chat_options["reasoning_effort"],
                 ):
                     event_type = event.get("type")
 
@@ -1158,18 +1514,43 @@ class ChatHandler(BaseHTTPRequestHandler):
                             self._send_sse_event({"type": "status", "status": status})
                         continue
 
+                    if event_type == "activity":
+                        activity = event.get("activity")
+                        if isinstance(activity, dict):
+                            self._send_sse_event({"type": "activity", "activity": activity})
+                        continue
+
                     if event_type == "done":
                         final_text = str(event.get("text") or full_text)
+                        tools_used = list(event.get("tools_used") or [])
+                        activity_log = list(event.get("activity_log") or [])
+                        resolved_model = str(event.get("model") or chat_options["model"]).strip() or chat_options["model"]
+                        response_reasoning_effort = str(
+                            event.get("reasoning_effort") or chat_options["reasoning_effort"] or ""
+                        ).strip() or None
 
                         conn.execute(
                             "DELETE FROM messages WHERE conversation_id = ? AND id >= ?",
                             (conversation_id, message_id),
                         )
+                        delete_memory_suggestions_from_message_id(conn, conversation_id, message_id, include_current=True)
+                        cleanup_orphaned_attachments(conn)
 
                         assistant_id = add_message_returning_id(
                             conn,
                             conversation_id,
-                            Message("assistant", final_text),
+                            Message(
+                                "assistant",
+                                final_text,
+                                {
+                                    "tools_used": tools_used,
+                                    "activity_log": activity_log,
+                                    "model": resolved_model,
+                                    "requested_model": chat_options["requested_model"],
+                                    "reasoning_enabled": chat_options["reasoning_enabled"],
+                                    "reasoning_effort": response_reasoning_effort,
+                                },
+                            ),
                         )
 
                         self._send_sse_event(
@@ -1179,6 +1560,12 @@ class ChatHandler(BaseHTTPRequestHandler):
                                     "id": assistant_id,
                                     "role": "assistant",
                                     "content": final_text,
+                                    "tools_used": tools_used,
+                                    "activity_log": activity_log,
+                                    "model": resolved_model,
+                                    "requested_model": chat_options["requested_model"],
+                                    "reasoning_enabled": chat_options["reasoning_enabled"],
+                                    "reasoning_effort": response_reasoning_effort,
                                 },
                                 "source_user_message": {
                                     "id": user_row["id"],
@@ -1305,6 +1692,10 @@ class ChatHandler(BaseHTTPRequestHandler):
                 query = (params.get("q", [""])[0] or "").strip()
                 self._send_json(self._list_conversations(query))
                 return
+
+            if parts == ["api", "settings"]:
+                self._send_json(self._get_client_settings())
+                return
             
             if len(parts) == 4 and parts[:2] == ["api", "conversations"] and parts[3] == "export":
                 params = parse_qs(parsed.query)
@@ -1400,6 +1791,15 @@ class ChatHandler(BaseHTTPRequestHandler):
                 self._send_json(self._handle_add_memory(payload), HTTPStatus.CREATED)
                 return
 
+            if len(parts) == 4 and parts[:2] == ["api", "memory-suggestions"] and parts[3] == "update":
+                payload = self._read_json()
+                self._send_json(self._handle_update_memory_suggestion(parts[2], payload))
+                return
+
+            if len(parts) == 4 and parts[:2] == ["api", "memory-suggestions"] and parts[3] == "accept":
+                self._send_json(self._handle_accept_memory_suggestion(parts[2]))
+                return
+
             if parts == ["api", "title"]:
                 payload = self._read_json()
                 self._send_json(self._handle_update_title(payload))
@@ -1430,6 +1830,10 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             if len(parts) == 3 and parts[:2] == ["api", "memories"]:
                 self._send_json(self._handle_delete_memory(parts[2]))
+                return
+
+            if len(parts) == 3 and parts[:2] == ["api", "memory-suggestions"]:
+                self._send_json(self._handle_delete_memory_suggestion(parts[2]))
                 return
 
             self._send_api_error("Not found", HTTPStatus.NOT_FOUND)
