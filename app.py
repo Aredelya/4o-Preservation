@@ -7,8 +7,11 @@ from typing import List, Optional
 from core import (
     ENV_PATH,
     Message,
+    TEXT_FILE_EXTENSIONS,
     add_memory,
     add_message,
+    add_message_returning_id,
+    auto_extract_memory_suggestions_from_user_text,
     build_system_prompt,
     call_openai,
     clear_memories,
@@ -25,6 +28,7 @@ from core import (
     list_memories,
     load_env_file,
     search_conversations,
+    summarize_content,
     update_conversation_title,
 )
 
@@ -33,9 +37,6 @@ ANSI_BOLD = "\033[1m"
 ANSI_BLUE = "\033[34m"
 ANSI_GREEN = "\033[32m"
 ANSI_DIM = "\033[2m"
-TEXT_FILE_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".py", ".log"}
-
-
 def supports_color() -> bool:
     return sys.stdout.isatty()
 
@@ -76,10 +77,12 @@ Commands:
   /memory clear             Delete all memories.
   /history [n]              Show previous messages from current conversation.
   /image <path> [prompt]    Send an image.
-  /file <path> [prompt]     Send a text file plus optional prompt.
+  /file <path> [prompt]     Send a text file or PDF plus optional prompt.
   /web <query>               Run a web search-backed query.
   /help                     Show this help message.
   /exit                     Exit the app.
+
+You can also paste GitHub links or direct PDF URLs into a normal message, and the app will try to pull them into context automatically.
 """
     )
 
@@ -96,7 +99,7 @@ def print_recent_history(
     print(style("\nRecent messages:", ANSI_BOLD, ANSI_GREEN))
     for message in shown:
         role_label = "You" if message.role == "user" else "Assistant"
-        print(f"{role_label}: {message.content}")
+        print(f"{role_label}: {summarize_content(message.content)}")
 
 
 def handle_memory_command(conn: sqlite3.Connection, args: List[str]) -> None:
@@ -117,8 +120,12 @@ def handle_memory_command(conn: sqlite3.Connection, args: List[str]) -> None:
         if not memories:
             print("No memories saved.")
             return
-        for mem_id, content, created_at in memories:
-            print(f"[{mem_id}] {content} (added {created_at})")
+        for memory in memories:
+            scope_label = memory.scope if memory.scope == "global" else f"{memory.scope}:{memory.scope_key or 'current'}"
+            flags = [memory.kind, scope_label]
+            if memory.pinned:
+                flags.append("pinned")
+            print(f"[{memory.id}] {memory.content} ({', '.join(flags)}; added {memory.created_at})")
     elif action == "delete":
         if len(args) < 2:
             print("Usage: /memory delete <id>")
@@ -148,7 +155,7 @@ def send_user_message(
     enable_code_interpreter: bool = True,
 ) -> None:
     history = get_recent_messages(conn, conversation_id)
-    system_prompt = build_system_prompt(conn, query)
+    system_prompt = build_system_prompt(conn, query, conversation_id=conversation_id)
     messages = [Message("system", system_prompt), *history, user_message]
 
     response_text = call_openai(
@@ -156,9 +163,29 @@ def send_user_message(
         web_search_mode=web_search_mode,
         enable_code_interpreter=enable_code_interpreter,
     )
-    add_message(conn, conversation_id, user_message)
-    add_message(conn, conversation_id, Message("assistant", response_text))
-    print(f"\nAssistant: {response_text}")
+    user_message_id = add_message_returning_id(conn, conversation_id, user_message)
+    auto_extract_memory_suggestions_from_user_text(
+        conn,
+        query,
+        conversation_id=conversation_id,
+        source_message_id=user_message_id,
+    )
+    add_message(
+        conn,
+        conversation_id,
+        Message(
+            "assistant",
+            response_text.text,
+            {
+                "tools_used": response_text.tools_used,
+                "activity_log": response_text.activity_log,
+                "model": response_text.model,
+                "reasoning_enabled": bool(response_text.reasoning_effort),
+                "reasoning_effort": response_text.reasoning_effort,
+            },
+        ),
+    )
+    print(f"\nAssistant: {response_text.text}")
 
 
 def main() -> int:
@@ -313,12 +340,15 @@ def main() -> int:
                     continue
                 file_path = args[0]
                 ext = os.path.splitext(file_path)[1].lower()
-                if ext not in TEXT_FILE_EXTENSIONS:
-                    print("Only text-like files are supported via /file (.txt, .md, .csv, .json, .py, .log).")
-                    continue
                 prompt = " ".join(args[1:]).strip() or "Please read and summarize this file."
                 try:
-                    user_message = create_user_message(text=prompt, text_file_paths=[file_path])
+                    if ext == ".pdf":
+                        user_message = create_user_message(text=prompt, file_paths=[file_path])
+                    elif ext in TEXT_FILE_EXTENSIONS:
+                        user_message = create_user_message(text=prompt, text_file_paths=[file_path])
+                    else:
+                        print("Only text-like files and PDFs are supported via /file.")
+                        continue
                     send_user_message(conn, conversation_id, user_message, prompt)
                 except Exception as exc:
                     print(f"Error: {exc}")
