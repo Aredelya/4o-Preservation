@@ -81,7 +81,8 @@ button {
 }
 
 input,
-textarea {
+textarea,
+select {
   background: rgba(255, 255, 255, 0.03);
   color: var(--text);
   padding: 12px 14px;
@@ -94,7 +95,8 @@ textarea::placeholder {
 }
 
 input:focus,
-textarea:focus {
+textarea:focus,
+select:focus {
   border-color: rgba(122, 162, 255, 0.55);
   box-shadow: 0 0 0 4px rgba(122, 162, 255, 0.12);
 }
@@ -511,6 +513,35 @@ h2 {
   gap: 10px 14px;
 }
 
+.composer-model-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+}
+
+.composer-setting {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 160px;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.composer-setting span {
+  line-height: 1.2;
+}
+
+.composer-setting select {
+  min-width: 0;
+}
+
+.reasoning-toggle {
+  min-height: 42px;
+  align-self: end;
+}
+
 .search-toggle {
   justify-self: start;
   display: inline-flex;
@@ -598,6 +629,70 @@ h2 {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: rgba(255, 255, 255, 0.035);
+}
+
+.memory-controls {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.memory-controls select {
+  min-width: 0;
+  flex: 1 1 140px;
+}
+
+.memory-pin-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.memory-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.memory-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  line-height: 1.2;
+  border: 1px solid rgba(122, 162, 255, 0.22);
+  background: rgba(122, 162, 255, 0.08);
+  color: rgba(226, 236, 255, 0.9);
+}
+
+.memory-suggestions {
+  margin-bottom: 12px;
+}
+
+.memory-suggestions[hidden] {
+  display: none;
+}
+
+.suggestion-item {
+  border-color: rgba(122, 162, 255, 0.22);
+  background: rgba(122, 162, 255, 0.06);
+}
+
+.suggestion-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.suggestion-editor-input {
+  width: 100%;
+  min-height: 84px;
+  resize: vertical;
+}
+
+.suggestion-editor-controls {
+  margin-top: 0;
 }
 
 .memory-actions {
@@ -843,5 +938,942 @@ h2 {
     position: static;
     margin-top: auto;
     border-top: 1px solid var(--border);
+  }
+}
+
+/* --- Mobile layout override: let chat own the screen, use slide-over drawers --- */
+.mobile-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 8, 16, 0.52);
+  backdrop-filter: blur(4px);
+  z-index: 24;
+}
+
+@media (max-width: 1100px) and (orientation: portrait) {
+  main {
+    grid-template-columns: 1fr !important;
+    grid-template-rows: minmax(0, 1fr) !important;
+    grid-template-areas: "center" !important;
+    min-height: calc(100dvh - 84px) !important;
+    height: calc(100dvh - 84px) !important;
+    gap: 10px;
+    padding: 10px;
+    overflow: hidden;
+  }
+
+  .panel-chat {
+    grid-area: center;
+    min-height: 0;
+  }
+
+  .panel-chat .messages {
+    min-height: 0;
+    padding-bottom: 6px;
+  }
+
+  .panel-chat .composer {
+    margin-top: 12px;
+    position: sticky;
+    bottom: 0;
+    z-index: 5;
+    background: rgba(14, 19, 31, 0.92);
+    backdrop-filter: blur(18px);
+    border-radius: 18px;
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
+  }
+
+  .panel-conversations,
+  .panel-memories {
+    position: fixed !important;
+    top: 74px;
+    bottom: 10px;
+    width: min(92vw, 420px);
+    z-index: 30;
+    box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45);
+    opacity: 0;
+    pointer-events: none;
+    transition: transform 0.22s ease, opacity 0.22s ease;
+  }
+
+  .panel-conversations {
+    left: 10px;
+    right: auto;
+    transform: translateX(-110%);
+  }
+
+  .panel-memories {
+    right: 10px;
+    left: auto;
+    transform: translateX(110%);
+    overflow-y: auto;
+    padding-bottom: 10px;
+  }
+
+  body.mobile-history-open .panel-conversations {
+    transform: translateX(0);
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  body.mobile-memories-open .panel-memories {
+    transform: translateX(0);
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  body.mobile-history-open .panel-memories {
+    transform: translateX(110%);
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  body.mobile-memories-open .panel-conversations {
+    transform: translateX(-110%);
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .chat-panel-heading {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .chat-heading-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .chat-heading-actions button {
+    flex: 1 1 0;
+  }
+
+  .panel-memories .row {
+    flex-wrap: wrap;
+  }
+
+  .panel-memories #saveMemory,
+  .panel-memories #clearMemories {
+    width: 100%;
+  }
+
+  .panel-memories #clearMemories {
+    margin-top: 6px;
+  }
+
+  .mobile-history-hint {
+    display: block;
+  }
+}
+
+@media (max-width: 640px) and (orientation: portrait) {
+  header {
+    padding: calc(12px + env(safe-area-inset-top, 0px)) 12px 12px;
+  }
+
+  .header-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .header-actions button {
+    flex: 1 1 calc(50% - 8px);
+    min-height: 42px;
+  }
+
+  .panel-chat {
+    padding: 14px 12px 12px;
+  }
+
+  .messages {
+    gap: 12px;
+    padding-right: 0;
+  }
+
+  .bubble {
+    max-width: 100%;
+    font-size: 16px;
+    line-height: 1.6;
+  }
+
+  textarea#messageInput {
+    min-height: 120px;
+  }
+
+  .panel-conversations,
+  .panel-memories {
+    top: 72px;
+    bottom: 8px;
+    width: calc(100vw - 16px);
+  }
+}
+
+/* --- Phone tightening pass: reduce card bloat and fix memories actions --- */
+@media (max-width: 760px) {
+  header {
+    padding: calc(10px + env(safe-area-inset-top, 0px)) 10px 10px !important;
+  }
+
+  .header-card,
+  .hero,
+  .header-shell,
+  .top-card {
+    padding: 14px !important;
+    border-radius: 18px !important;
+  }
+
+  .header-actions,
+  .chat-heading-actions,
+  .panel-memories .row,
+  .panel-memories .memory-actions {
+    display: grid !important;
+    grid-template-columns: 1fr 1fr !important;
+    gap: 8px !important;
+    width: 100% !important;
+  }
+
+  .header-actions button,
+  .chat-heading-actions button,
+  .panel-memories .row > button,
+  .panel-memories .memory-actions > button,
+  #saveMemory,
+  #clearMemories {
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  main {
+    gap: 8px !important;
+    padding: 8px !important;
+    min-height: calc(100dvh - 76px) !important;
+    height: calc(100dvh - 76px) !important;
+  }
+
+  .panel-chat,
+  .panel-conversations,
+  .panel-memories {
+    border-radius: 18px !important;
+  }
+
+  .panel-chat {
+    padding: 12px !important;
+  }
+
+  .panel-chat h2,
+  .panel-conversations h2,
+  .panel-memories h2 {
+    margin-bottom: 10px !important;
+  }
+
+  .messages {
+    gap: 10px !important;
+    padding-bottom: 4px !important;
+  }
+
+  .bubble {
+    padding: 14px 16px !important;
+    border-radius: 16px !important;
+    font-size: 15px !important;
+    line-height: 1.5 !important;
+    max-width: 100% !important;
+  }
+
+  .panel-chat .composer {
+    margin-top: 10px !important;
+    padding: 10px !important;
+    border-radius: 16px !important;
+  }
+
+  textarea#messageInput {
+    min-height: 84px !important;
+    max-height: 160px !important;
+    padding: 12px !important;
+    font-size: 16px !important;
+  }
+
+  #sendButton,
+  .send-button,
+  button.primary {
+    min-height: 48px !important;
+  }
+
+  .search-row,
+  .chat-search,
+  .search-controls {
+    display: grid !important;
+    grid-template-columns: 44px 1fr !important;
+    gap: 8px !important;
+    align-items: center !important;
+  }
+
+  .search-row input,
+  .chat-search input,
+  .search-controls input {
+    min-width: 0 !important;
+    width: 100% !important;
+  }
+
+  .search-nav,
+  .search-buttons,
+  .search-actions {
+    display: grid !important;
+    grid-template-columns: 44px 44px 1fr auto !important;
+    gap: 8px !important;
+    align-items: center !important;
+  }
+
+  .panel-memories {
+    padding: 12px !important;
+    overflow-x: hidden !important;
+  }
+
+  .panel-memories input,
+  .panel-memories textarea,
+  .panel-memories select {
+    width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box !important;
+  }
+
+  #memoryPanel .row,
+  #memoryPanel .memory-actions {
+    display: grid !important;
+    grid-template-columns: 1fr 1fr !important;
+    gap: 8px !important;
+  }
+
+  #saveMemory,
+  #clearMemories {
+    display: block !important;
+    width: 100% !important;
+    margin: 0 !important;
+  }
+}
+
+@media (max-width: 520px) {
+  .header-actions,
+  .chat-heading-actions {
+    grid-template-columns: 1fr 1fr !important;
+  }
+
+  .panel-chat {
+    padding: 10px !important;
+  }
+
+  .bubble {
+    font-size: 14px !important;
+    padding: 12px 14px !important;
+  }
+
+  textarea#messageInput {
+    min-height: 72px !important;
+  }
+
+  .search-nav,
+  .search-buttons,
+  .search-actions {
+    grid-template-columns: 40px 40px 1fr auto !important;
+  }
+}
+
+/* --- Mobile chat-first pass: maximize message viewport --- */
+@media (max-width: 760px) {
+  main {
+    min-height: calc(100dvh - 72px) !important;
+    height: calc(100dvh - 72px) !important;
+  }
+
+  /* Make the top card much shorter */
+  header .brand-subtitle,
+  header .subtitle,
+  .hero p,
+  .header-copy p {
+    font-size: 0.95rem !important;
+    line-height: 1.3 !important;
+  }
+
+  .header-card,
+  .hero,
+  .header-shell,
+  .top-card,
+  header > section,
+  header .panel {
+    padding: 12px !important;
+  }
+
+  /* Compress the chat card and let it stretch */
+  .panel-chat {
+    display: flex !important;
+    flex-direction: column !important;
+    min-height: 0 !important;
+    height: 100% !important;
+    padding: 10px !important;
+  }
+
+  /* The message list should take the leftover space */
+  .messages,
+  #messages {
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    overflow-y: auto !important;
+    max-height: none !important;
+  }
+
+  /* Make search tools lighter and collapsible-by-default feel */
+  .search-row,
+  .chat-search,
+  .search-controls {
+    margin-bottom: 8px !important;
+  }
+
+  .search-nav,
+  .search-buttons,
+  .search-actions {
+    margin-bottom: 8px !important;
+  }
+
+  .panel-chat .composer {
+    margin-top: 8px !important;
+    padding: 8px !important;
+  }
+
+  textarea#messageInput {
+    min-height: 64px !important;
+    max-height: 120px !important;
+  }
+
+  /* Make upload and extra toggles less dominant */
+  .composer input[type="file"],
+  .panel-chat input[type="file"],
+  #fileInput,
+  #attachmentInput {
+    font-size: 14px !important;
+  }
+
+  .panel-chat label,
+  .panel-chat .checkbox-row,
+  .panel-chat .toggle-row,
+  .panel-chat .option-row {
+    font-size: 0.95rem !important;
+    line-height: 1.3 !important;
+  }
+
+  /* If the app uses a bottom controls/options area, compress it */
+  .chat-footer,
+  .composer-footer,
+  .extra-controls,
+  .advanced-controls {
+    margin-top: 8px !important;
+    gap: 8px !important;
+  }
+}
+
+@media (max-width: 520px) {
+  /* Stack the header into a tighter 2-row compact block */
+  .header-actions {
+    gap: 6px !important;
+  }
+
+  .header-actions button {
+    min-height: 40px !important;
+    padding: 10px !important;
+  }
+
+  .panel-chat {
+    padding: 8px !important;
+  }
+
+  .messages,
+  #messages {
+    padding-bottom: 2px !important;
+  }
+
+  textarea#messageInput {
+    min-height: 56px !important;
+    max-height: 100px !important;
+  }
+
+  #sendButton,
+  .send-button,
+  button.primary {
+    min-height: 44px !important;
+  }
+}
+
+/* --- Mobile chat-first: collapse composer extras --- */
+
+@media (max-width: 760px) {
+  .chat-title-row {
+    width: 100%;
+  }
+
+  .chat-title-row h2 {
+    margin: 0;
+  }
+
+  .chat-heading-actions {
+    display: grid !important;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    width: 100%;
+  }
+
+  .chat-heading-actions button {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .panel-chat {
+    display: flex !important;
+    flex-direction: column !important;
+    min-height: 0 !important;
+    height: 100% !important;
+    padding: 10px !important;
+  }
+
+  .messages,
+  #messageList {
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    overflow-y: auto !important;
+    max-height: none !important;
+  }
+
+  .composer {
+    margin-top: 8px !important;
+    padding: 8px !important;
+    border-radius: 16px !important;
+  }
+
+  textarea#messageInput {
+    min-height: 56px !important;
+    max-height: 110px !important;
+  }
+
+  .composer-tools {
+    display: none;
+  }
+
+  .composer-tools.open {
+    display: block;
+  }
+
+  .composer-toggles {
+    display: grid !important;
+    grid-template-columns: 1fr;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .composer-model-controls {
+    display: grid !important;
+    grid-template-columns: 1fr;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .composer-setting {
+    min-width: 0;
+  }
+
+  .composer-actions {
+    margin-top: 8px !important;
+  }
+
+  #fileInput {
+    width: 100%;
+    min-width: 0;
+    font-size: 14px;
+  }
+}
+
+@media (min-width: 761px) {
+  .composer-tools {
+    display: block !important;
+  }
+}
+
+/* --- Aggressive mobile chat-first layout --- */
+@media (max-width: 760px) {
+  header {
+    padding: calc(8px + env(safe-area-inset-top, 0px)) 8px 8px !important;
+  }
+
+  header strong {
+    font-size: 0.95rem !important;
+    line-height: 1.15 !important;
+  }
+
+  header .muted {
+    font-size: 0.78rem !important;
+    line-height: 1.2 !important;
+    margin-top: 2px !important;
+  }
+
+  main {
+    gap: 8px !important;
+    padding: 8px !important;
+    min-height: calc(100dvh - 64px) !important;
+    height: calc(100dvh - 64px) !important;
+    overflow: hidden !important;
+  }
+
+  /* Make header card much shorter */
+  header,
+  .panel-chat,
+  .panel-conversations,
+  .panel-memories {
+    border-radius: 16px !important;
+  }
+
+  .header-actions {
+    gap: 6px !important;
+    align-items: stretch !important;
+  }
+
+  .header-actions button {
+    min-height: 40px !important;
+    padding: 8px 10px !important;
+    font-size: 0.95rem !important;
+  }
+
+  /* Chat panel should behave like a true viewport */
+  .panel-chat {
+    display: flex !important;
+    flex-direction: column !important;
+    min-height: 0 !important;
+    height: 100% !important;
+    padding: 8px !important;
+    overflow: hidden !important;
+  }
+
+  .compact-chat-heading {
+    padding-bottom: 6px !important;
+    margin-bottom: 4px !important;
+  }
+
+  .chat-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    width: 100%;
+  }
+
+  .chat-title-row h2 {
+    margin: 0 !important;
+    font-size: 1rem !important;
+  }
+
+  .chat-mobile-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  .chat-mobile-actions button {
+    min-height: 38px !important;
+    padding: 8px 10px !important;
+  }
+
+  /* Message area gets priority */
+  .messages,
+  #messageList {
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    overflow-y: auto !important;
+    max-height: none !important;
+    margin: 0 !important;
+    padding-bottom: 6px !important;
+  }
+
+  .messages .bubble,
+  .bubble {
+    max-width: 100% !important;
+    font-size: 15px !important;
+    line-height: 1.45 !important;
+    padding: 12px 14px !important;
+  }
+
+  /* Composer becomes compact */
+  .composer {
+    margin-top: 6px !important;
+    padding: 6px !important;
+    border-radius: 14px !important;
+    gap: 6px !important;
+  }
+
+  textarea#messageInput {
+    min-height: 48px !important;
+    max-height: 88px !important;
+    padding: 10px !important;
+    font-size: 16px !important;
+  }
+
+  .composer-actions {
+    margin-top: 4px !important;
+  }
+
+  .composer-actions button {
+    min-height: 42px !important;
+  }
+
+  .composer-tools {
+    display: none;
+  }
+
+  .composer-tools.open {
+    display: block;
+  }
+
+  .composer-toggles {
+    display: grid !important;
+    grid-template-columns: 1fr !important;
+    gap: 6px !important;
+    margin-top: 6px !important;
+  }
+
+  #fileInput {
+    width: 100% !important;
+    font-size: 13px !important;
+  }
+
+  .status {
+    margin-bottom: 4px !important;
+  }
+}
+
+@media (max-width: 760px) {
+  header .muted {
+    display: none !important;
+  }
+}
+
+@media (max-width: 760px) {
+  .chat-panel-heading {
+    margin-bottom: 8px !important;
+  }
+
+  .chat-mobile-actions {
+    margin-left: auto;
+  }
+
+  .chat-heading-actions {
+    display: none !important;
+  }
+
+  .panel-chat {
+    padding: 8px !important;
+  }
+
+  .composer {
+    padding: 6px !important;
+    margin-top: 6px !important;
+  }
+
+  textarea#messageInput {
+    min-height: 44px !important;
+    max-height: 80px !important;
+  }
+}
+
+/* --- Clean mobile emergency fix: maximize message area --- */
+@media (max-width: 760px) {
+  /* Smaller top card */
+  header {
+    padding: calc(8px + env(safe-area-inset-top, 0px)) 8px 8px !important;
+    margin: 8px 8px 0 !important;
+    min-height: 0 !important;
+    gap: 8px !important;
+  }
+
+  header strong {
+    font-size: 0.9rem !important;
+    line-height: 1.05 !important;
+  }
+
+  header .muted {
+    display: none !important;
+  }
+
+  .header-actions {
+    gap: 6px !important;
+  }
+
+  .header-actions button {
+    min-height: 38px !important;
+    padding: 8px 10px !important;
+    font-size: 0.95rem !important;
+  }
+
+  /* Give main/chat more height */
+  main {
+    padding: 8px !important;
+    gap: 8px !important;
+    min-height: calc(100dvh - 58px) !important;
+    height: calc(100dvh - 58px) !important;
+  }
+
+  .panel-chat {
+    padding: 8px !important;
+    display: flex !important;
+    flex-direction: column !important;
+    min-height: 0 !important;
+    height: 100% !important;
+    overflow: hidden !important;
+  }
+
+  .chat-panel-heading {
+    margin-bottom: 6px !important;
+    gap: 6px !important;
+  }
+
+  .chat-panel-heading h2,
+  #conversationTitle {
+    margin: 0 !important;
+    font-size: 0.98rem !important;
+  }
+
+  /* Hide always-visible utility clutter on phones */
+  .chat-heading-actions,
+  .search-row,
+  .search-nav,
+  .search-buttons,
+  .search-actions,
+  .mobile-search-tools {
+    display: none !important;
+  }
+
+  /* Messages should win the height battle */
+  .messages,
+  #messageList {
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow-y: auto !important;
+    gap: 10px !important;
+    padding-right: 0 !important;
+    padding-bottom: 6px !important;
+    margin: 0 !important;
+  }
+
+  .bubble {
+    max-width: 100% !important;
+    padding: 12px 14px !important;
+    font-size: 15px !important;
+    line-height: 1.42 !important;
+  }
+
+  /* Compact composer */
+  .composer {
+    margin-top: 6px !important;
+    padding: 6px !important;
+    gap: 6px !important;
+    border-radius: 14px !important;
+    grid-template-columns: 1fr !important;
+    grid-template-areas:
+      "text"
+      "hint"
+      "send" !important;
+  }
+
+  textarea,
+  textarea#messageInput,
+  .composer textarea {
+    min-height: 44px !important;
+    max-height: 72px !important;
+    padding: 10px !important;
+    font-size: 16px !important;
+  }
+
+  .composer-hint[hidden] {
+    display: none !important;
+  }
+
+  /* Keep tools collapsed unless explicitly opened */
+  .composer-tools {
+    display: none !important;
+  }
+
+  .composer-tools.open {
+    display: block !important;
+    margin-top: 6px !important;
+  }
+
+  .composer-actions {
+    margin-top: 2px !important;
+  }
+
+  .composer-actions button,
+  #sendMessage {
+    min-height: 42px !important;
+  }
+
+  .chat-mobile-actions {
+    margin-left: auto !important;
+  }
+
+  .chat-mobile-actions button {
+    min-height: 38px !important;
+    padding: 8px 10px !important;
+  }
+}
+
+@media (max-width: 760px) {
+  .chat-heading-actions {
+    display: none !important;
+  }
+
+  .panel-chat {
+    padding: 8px !important;
+  }
+
+  .messages,
+  #messageList {
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    overflow-y: auto !important;
+  }
+
+  .composer {
+    padding: 6px !important;
+    gap: 6px !important;
+  }
+
+  textarea#messageInput {
+    min-height: 44px !important;
+    max-height: 72px !important;
+  }
+}
+
+@media (max-width: 760px) {
+  .chat-search-bar {
+    display: none !important;
+  }
+
+  .chat-heading-actions {
+    display: none !important;
+  }
+
+  .panel-chat {
+    padding: 8px !important;
+  }
+
+  .messages,
+  #messageList {
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    overflow-y: auto !important;
+  }
+
+  .composer {
+    padding: 6px !important;
+    gap: 6px !important;
+  }
+
+  textarea#messageInput {
+    min-height: 44px !important;
+    max-height: 72px !important;
   }
 }
