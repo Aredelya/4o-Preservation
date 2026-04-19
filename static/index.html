@@ -23,6 +23,14 @@
         >
           History
         </button>
+        <button id="memoryToggle"
+          type="button"
+          class="secondary mobile-only"
+          aria-expanded="false"
+          aria-controls="memoryPanel"
+        >
+          Memories
+        </button>
         <button class="secondary" id="logoutButton" type="button">Log out</button>
         <button class="primary" id="newConversation" type="button">New chat</button>
       </div>
@@ -58,9 +66,24 @@
       </section>
 
       <section class="panel-chat" aria-label="Active conversation">
-        <div class="panel-heading chat-panel-heading">
-          <h2 id="conversationTitle">Chat</h2>
-          <div class="chat-heading-actions">
+        <div class="panel-heading chat-panel-heading compact-chat-heading">
+          <div class="chat-title-row">
+            <h2 id="conversationTitle">Chat</h2>
+          
+            <div class="chat-mobile-actions">
+              <button
+                id="toggleComposerTools"
+                type="button"
+                class="secondary mobile-only"
+                aria-expanded="false"
+                aria-controls="composerTools"
+              >
+                Tools
+              </button>
+            </div>
+          </div>
+        
+          <div class="chat-heading-actions desktop-export-actions">
             <button
               id="exportConversationMarkdown"
               type="button"
@@ -79,54 +102,76 @@
             </button>
           </div>
         </div>
+
         <div id="statusBanner" class="status" aria-live="polite"></div>
         <div class="messages" id="messageList" aria-live="polite"></div>
-
+        
         <div class="composer">
           <textarea
-          id="messageInput"
-                
-          placeholder="Type a message..."
-                
-          aria-label="Message input"
-                
+            id="messageInput"
+            placeholder="Type a message or paste a GitHub/PDF link..."
+            aria-label="Message input"
           ></textarea>
-                
+        
           <div
-          id="imageCommandHint"
-          class="composer-hint"
-          hidden
-          aria-live="polite"
-          aria-hidden="true"
+            id="imageCommandHint"
+            class="composer-hint"
+            hidden
+            aria-live="polite"
+            aria-hidden="true"
           >
-          <strong>/image options:</strong>
-          <code>model=gpt-image-1.5|gpt-image-1|gpt-image-1-mini|dall-e-3|dall-e-2</code>,
-          <code>size=1024x1024|1024x1536|1536x1024|auto</code>,
-          <code>quality=low|medium|high|auto</code>,
-          <code>background=transparent|opaque|auto</code>,
-          <code>output_format=png|webp|jpeg</code>.
-          Example:
-          <code>/image size=1536x1024 quality=high background=transparent A glass spaceship in a desert</code>
+            <strong>/image options:</strong>
+            <code>model=gpt-image-1.5|gpt-image-1|gpt-image-1-mini|dall-e-3|dall-e-2</code>,
+            <code>size=1024x1024|1024x1536|1536x1024|auto</code>,
+            <code>quality=low|medium|high|auto</code>,
+            <code>background=transparent|opaque|auto</code>,
+            <code>output_format=png|webp|jpeg</code>.
+            Example:
+            <code>/image size=1536x1024 quality=high background=transparent A glass spaceship in a desert</code>
           </div>
         
-          <input
-            type="file"
-            id="fileInput"
-            multiple
-            accept="image/*,.txt,.md,.csv,.json,.py,.log"
-            aria-label="Attach files"
-          />
-          <div class="composer-toggles">
-            <label class="search-toggle">
-              <input type="checkbox" id="enableWebSearch" checked />
-              Allow web search when needed
-            </label>
-            <label class="search-toggle">
-              <input type="checkbox" id="enableCodeInterpreter" checked />
-              Allow code interpreter
-            </label>
-          </div>
+          <div id="composerTools" class="composer-tools">
+            <input
+              type="file"
+              id="fileInput"
+              multiple
+              accept="image/*,.pdf,.txt,.md,.markdown,.csv,.tsv,.json,.jsonl,.py,.js,.ts,.tsx,.jsx,.html,.css,.xml,.yaml,.yml,.log,.toml,.ini,.cfg,.sql"
+              aria-label="Attach files"
+            />
+          
+            <div class="composer-toggles">
+              <label class="search-toggle">
+                <input type="checkbox" id="enableWebSearch" checked />
+                Allow web search when needed
+              </label>
+              <label class="search-toggle">
+                <input type="checkbox" id="enableCodeInterpreter" checked />
+                Allow code interpreter
+              </label>
+            </div>
 
+            <div class="composer-model-controls">
+              <label class="composer-setting">
+                <span>Model</span>
+                <select id="modelSelect" aria-label="Model">
+                  <option value="">Loading models...</option>
+                </select>
+              </label>
+              <label class="search-toggle reasoning-toggle">
+                <input type="checkbox" id="enableReasoning" />
+                Use reasoning mode
+              </label>
+              <label class="composer-setting">
+                <span>Reasoning effort</span>
+                <select id="reasoningEffort" aria-label="Reasoning effort" disabled>
+                  <option value="low">Low</option>
+                  <option value="medium" selected>Medium</option>
+                  <option value="high">High</option>
+                </select>
+              </label>
+            </div>
+          </div>
+        
           <div class="composer-actions">
             <button class="secondary" id="cancelResponseBtn" type="button" hidden disabled>Cancel</button>
             <button class="primary" id="sendMessage" type="button">Send</button>
@@ -134,8 +179,18 @@
         </div>
       </section>
 
-      <section class="panel-memories" aria-label="Memories">
+      <section class="panel-memories" id="memoryPanel" aria-label="Memories">
+       <div class="panel-heading">
         <h2>Memories</h2>
+        <button
+         id="closeMemories"
+         type="button"
+         class="secondary mobile-only"
+         aria-label="Close memories"
+        >
+         Close
+        </button>
+       </div>
 
         <div class="row">
           <input
@@ -148,10 +203,32 @@
           <button class="primary" id="saveMemory" type="button">Save</button>
         </div>
 
+        <div class="row memory-controls">
+          <select id="memoryKind" aria-label="Memory kind">
+            <option value="note">General note</option>
+            <option value="preference">Preference</option>
+            <option value="project">Project fact</option>
+            <option value="task">Task / goal</option>
+            <option value="fact">Fact</option>
+            <option value="identity">Identity</option>
+          </select>
+          <select id="memoryScope" aria-label="Memory scope">
+            <option value="global">Global</option>
+            <option value="conversation">Current chat</option>
+          </select>
+          <label class="search-toggle memory-pin-toggle">
+            <input type="checkbox" id="memoryPinned" />
+            Pin
+          </label>
+        </div>
+
+        <div id="memorySuggestions" class="list memory-suggestions" aria-live="polite"></div>
         <div class="list" id="memoryList" aria-live="polite"></div>
         <button id="clearMemories" type="button">Clear memories</button>
       </section>
     </main>
+
+    <div id="mobileDrawerBackdrop" class="mobile-drawer-backdrop" hidden></div>
 
     <script src="/static/app.js"></script>
   </body>
