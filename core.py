@@ -9,7 +9,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 from urllib import error, request
@@ -19,7 +19,7 @@ DB_PATH = os.environ.get("CHATBOT_DB", "chatbot.db")
 API_URL = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/responses")
 IMAGES_API_URL = os.environ.get("OPENAI_IMAGES_API_URL", "https://api.openai.com/v1/images/generations")
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-2024-11-20")
-IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1")
+IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
 DEFAULT_REASONING_MODEL = os.environ.get("OPENAI_REASONING_MODEL", "gpt-5.4").strip() or "gpt-5.4"
 DEFAULT_REASONING_EFFORT = os.environ.get("OPENAI_REASONING_EFFORT", "medium").strip().lower() or "medium"
 MAX_HISTORY = int(os.environ.get("CHATBOT_MAX_HISTORY", "50"))
@@ -315,7 +315,7 @@ class MemorySuggestionRecord:
 
 
 def now_iso() -> str:
-    return datetime.utcnow().isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def get_attachments_dir() -> Path:
@@ -526,6 +526,207 @@ def deserialize_message_metadata(metadata_text: Optional[str]) -> dict:
         return parsed if isinstance(parsed, dict) else {}
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
+
+
+def message_content_has_inspectable_attachments(content: object) -> bool:
+    if not isinstance(content, list):
+        return False
+
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("type") or "").strip()
+        if block_type in {"input_image", "input_file"}:
+            return True
+    return False
+
+
+def message_content_has_image_attachment(content: object) -> bool:
+    if not isinstance(content, list):
+        return False
+
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if str(block.get("type") or "").strip() == "input_image":
+            return True
+    return False
+
+
+def message_content_has_file_attachment(content: object) -> bool:
+    if not isinstance(content, list):
+        return False
+
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if str(block.get("type") or "").strip() == "input_file":
+            return True
+    return False
+
+
+def raw_content_has_inspectable_attachments(raw_content: Optional[str], fallback_content: str = "") -> bool:
+    if raw_content:
+        try:
+            parsed = json.loads(raw_content)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = None
+        if message_content_has_inspectable_attachments(parsed):
+            return True
+
+    fallback = str(fallback_content or "")
+    return "[image]" in fallback or "[file" in fallback
+
+
+def extract_message_attachment_cards(content: object) -> List[dict]:
+    if not isinstance(content, list):
+        return []
+
+    cards: List[dict] = []
+    for index, block in enumerate(content, start=1):
+        if not isinstance(block, dict):
+            continue
+
+        block_type = str(block.get("type") or "").strip()
+        if block_type == "input_image":
+            image_url = str(block.get("image_url") or "").strip()
+            if not image_url:
+                continue
+
+            mime_type = ""
+            if image_url.startswith("data:"):
+                try:
+                    mime_type, _payload = decode_data_url(image_url)
+                except ValueError:
+                    mime_type = ""
+
+            cards.append(
+                {
+                    "kind": "image",
+                    "label": f"Image {index}",
+                    "mime_type": mime_type or "image/*",
+                    "thumbnail_url": image_url,
+                }
+            )
+            continue
+
+        if block_type == "input_text":
+            block_text = str(block.get("text") or "")
+            text_file_match = re.match(r"^File \(([^)]+)\):\n([\s\S]*)$", block_text)
+            if not text_file_match:
+                continue
+
+            filename = text_file_match.group(1).strip()
+            full_text = text_file_match.group(2).strip()
+            preview_text = full_text[:280].strip()
+            if len(full_text) > 280:
+                preview_text = f"{preview_text}..."
+
+            cards.append(
+                {
+                    "kind": "text",
+                    "label": filename or f"Text file {index}",
+                    "filename": filename,
+                    "mime_type": mimetypes.guess_type(filename)[0] or "text/plain",
+                    "preview_text": preview_text,
+                    "full_text": full_text[:12000],
+                    "truncated": len(full_text) > 12000,
+                }
+            )
+            continue
+
+        if block_type != "input_file":
+            continue
+
+        filename = str(block.get("filename") or "").strip()
+        file_url = str(block.get("file_url") or "").strip()
+        file_data = str(block.get("file_data") or "").strip()
+        mime_type = ""
+
+        if filename:
+            mime_type = mimetypes.guess_type(filename)[0] or ""
+        if not mime_type and file_url:
+            mime_type = mimetypes.guess_type(file_url)[0] or ""
+
+        label = filename or file_url or f"File {index}"
+        card = {
+            "kind": "file",
+            "label": label,
+            "filename": filename,
+            "mime_type": mime_type or "application/octet-stream",
+            "file_url": file_url,
+        }
+        if file_data and (mime_type or "").lower() == "application/pdf" and len(file_data) <= 3_500_000:
+            card["preview_data_url"] = f"data:application/pdf;base64,{file_data}"
+        cards.append(card)
+
+    return cards
+
+
+def metadata_inspected_attachment_message_ids(metadata: Optional[dict]) -> List[int]:
+    if not isinstance(metadata, dict):
+        return []
+
+    ids: List[int] = []
+    seen = set()
+    for raw_id in list(metadata.get("inspected_attachment_message_ids") or []):
+        try:
+            message_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if message_id <= 0 or message_id in seen:
+            continue
+        seen.add(message_id)
+        ids.append(message_id)
+    return ids
+
+
+def metadata_reinspect_message_ids(metadata: Optional[dict]) -> List[int]:
+    if not isinstance(metadata, dict):
+        return []
+
+    ids: List[int] = []
+    seen = set()
+    for raw_id in list(metadata.get("reinspect_message_ids") or []):
+        try:
+            message_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if message_id <= 0 or message_id in seen:
+            continue
+        seen.add(message_id)
+        ids.append(message_id)
+    return ids
+
+
+def strip_message_attachments_for_replay(content: object) -> object:
+    if not isinstance(content, list):
+        return content
+
+    stripped: List[dict] = []
+    removed_attachment = False
+    has_text = False
+
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("type") or "").strip()
+        if block_type in {"input_image", "input_file"}:
+            removed_attachment = True
+            continue
+        if block_type == "input_text" and str(block.get("text") or "").strip():
+            has_text = True
+        stripped.append(dict(block))
+
+    if removed_attachment and not has_text:
+        stripped.insert(
+            0,
+            {
+                "type": "input_text",
+                "text": "(Earlier attachment omitted from replay because it was already inspected.)",
+            },
+        )
+    return stripped
 
 
 def create_conversation(conn: sqlite3.Connection, title: Optional[str] = None) -> str:
@@ -2492,6 +2693,72 @@ def get_recent_messages(conn: sqlite3.Connection, conversation_id: str) -> List[
     return [message_from_row(row) for row in reversed(rows)]
 
 
+def get_recent_message_rows_with_ids(conn: sqlite3.Connection, conversation_id: str) -> List[sqlite3.Row]:
+    rows = conn.execute(
+        """
+        SELECT id, role, content, raw_content, metadata, created_at
+        FROM messages
+        WHERE conversation_id = ?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (conversation_id, MAX_HISTORY),
+    ).fetchall()
+    return list(reversed(rows))
+
+
+def build_replay_history_from_rows(
+    rows: Iterable[sqlite3.Row],
+    *,
+    query: Optional[str] = None,
+    current_user_message: Optional[Message] = None,
+    reinspect_message_ids: Optional[Iterable[int]] = None,
+) -> List[Message]:
+    row_list = list(rows)
+    suppress_attachment_ids: set[int] = set()
+    explicit_reinspect_ids: set[int] = set()
+    for raw_id in list(reinspect_message_ids or []):
+        try:
+            message_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if message_id > 0:
+            explicit_reinspect_ids.add(message_id)
+    explicit_reinspect_ids.update(metadata_reinspect_message_ids(getattr(current_user_message, "metadata", None)))
+
+    should_suppress = (
+        current_user_message is None
+        or not message_content_has_inspectable_attachments(current_user_message.content)
+    ) and not query_requests_attachment_reinspection(query) and not explicit_reinspect_ids
+
+    if should_suppress:
+        for row in row_list:
+            if str(row["role"] or "") != "assistant":
+                continue
+            metadata = deserialize_message_metadata(row["metadata"])
+            for message_id in metadata_inspected_attachment_message_ids(metadata):
+                if message_id > 0:
+                    suppress_attachment_ids.add(message_id)
+
+    history: List[Message] = []
+    for row in row_list:
+        message = message_from_row(row)
+        if (
+            suppress_attachment_ids
+            and str(row["role"] or "") == "user"
+            and int(row["id"]) in suppress_attachment_ids
+            and int(row["id"]) not in explicit_reinspect_ids
+        ):
+            message = Message(
+                message.role,
+                strip_message_attachments_for_replay(message.content),
+                message.metadata,
+            )
+        history.append(message)
+
+    return history
+
+
 def get_all_messages(conn: sqlite3.Connection, conversation_id: str) -> List[Message]:
     rows = conn.execute(
         """
@@ -2595,6 +2862,238 @@ def _memory_matches_scope(memory: MemoryRecord, conversation_id: Optional[str]) 
     return True
 
 
+def should_track_attachment_inspection(tools_used: Iterable[str]) -> bool:
+    normalized = {normalize_tool_label(tool_name) for tool_name in tools_used}
+    return "python" in normalized or "files" in normalized
+
+
+def direct_attachment_answer_likely_succeeded(
+    response_text: Optional[str],
+    current_user_message: Optional[Message],
+) -> bool:
+    if current_user_message is None or not message_content_has_inspectable_attachments(current_user_message.content):
+        return False
+
+    normalized = re.sub(r"\s+", " ", str(response_text or "").strip().lower())
+    if not normalized:
+        return False
+
+    failure_markers = (
+        "i can't see",
+        "i cannot see",
+        "can't view",
+        "cannot view",
+        "can't perceive",
+        "cannot perceive",
+        "can't quite perceive",
+        "cannot quite perceive",
+        "can't fully see",
+        "cannot fully see",
+        "can't see her fully",
+        "cannot see her fully",
+        "payload is missing",
+        "missing from local attachment storage",
+        "unreadable",
+        "describe it for me",
+        "paint her world for me",
+    )
+    return not any(marker in normalized for marker in failure_markers)
+
+
+def infer_inspected_attachment_message_ids(
+    history_rows: Iterable[sqlite3.Row],
+    *,
+    current_user_message_id: int = 0,
+    current_user_message: Optional[Message] = None,
+    tools_used: Iterable[str] = (),
+    response_text: Optional[str] = None,
+) -> List[int]:
+    tracked_by_tools = should_track_attachment_inspection(tools_used)
+    tracked_by_direct_answer = direct_attachment_answer_likely_succeeded(
+        response_text,
+        current_user_message,
+    )
+    if not tracked_by_tools and not tracked_by_direct_answer:
+        return []
+
+    inspected_ids: List[int] = []
+    seen = set()
+    if tracked_by_tools:
+        for row in list(history_rows):
+            if str(row["role"] or "") != "user":
+                continue
+            message_id = int(row["id"])
+            if message_id <= 0 or message_id in seen:
+                continue
+            if not raw_content_has_inspectable_attachments(row["raw_content"], row["content"]):
+                continue
+            seen.add(message_id)
+            inspected_ids.append(message_id)
+
+    if (
+        current_user_message_id > 0
+        and current_user_message is not None
+        and current_user_message_id not in seen
+        and message_content_has_inspectable_attachments(current_user_message.content)
+    ):
+        inspected_ids.append(current_user_message_id)
+
+    return inspected_ids[-6:]
+
+
+def query_requests_attachment_reinspection(query: Optional[str]) -> bool:
+    normalized = re.sub(r"\s+", " ", str(query or "").strip().lower())
+    if not normalized:
+        return False
+
+    attachment_terms = (
+        "image",
+        "photo",
+        "picture",
+        "screenshot",
+        "file",
+        "pdf",
+        "document",
+        "attachment",
+    )
+    action_terms = (
+        "look",
+        "analyze",
+        "analyse",
+        "inspect",
+        "examine",
+        "describe",
+        "read",
+        "open",
+        "process",
+        "review",
+        "check",
+    )
+    if any(term in normalized for term in action_terms) and any(term in normalized for term in attachment_terms):
+        return True
+    if "again" in normalized and any(term in normalized for term in action_terms):
+        return True
+    if re.search(r"\bwhat(?:'s| is) in (?:it|this|that)\b", normalized):
+        return True
+    return False
+
+
+def build_recent_attachment_guard_prompt(
+    conn: sqlite3.Connection,
+    conversation_id: Optional[str],
+    query: Optional[str],
+    current_user_message: Optional[Message] = None,
+) -> str:
+    conversation_key = str(conversation_id or "").strip()
+    if not conversation_key or query_requests_attachment_reinspection(query):
+        return ""
+
+    rows = get_recent_message_rows_with_ids(conn, conversation_key)
+    if not rows:
+        return ""
+
+    attachment_rows: dict[int, sqlite3.Row] = {}
+    inspected_rows: List[sqlite3.Row] = []
+    seen_message_ids = set()
+
+    for row in rows:
+        message_id = int(row["id"])
+        role = str(row["role"] or "")
+        if role == "user" and raw_content_has_inspectable_attachments(row["raw_content"], row["content"]):
+            attachment_rows[message_id] = row
+            continue
+        if role != "assistant":
+            continue
+        metadata = deserialize_message_metadata(row["metadata"])
+        for inspected_id in metadata_inspected_attachment_message_ids(metadata):
+            if inspected_id in seen_message_ids:
+                continue
+            attachment_row = attachment_rows.get(inspected_id)
+            if attachment_row is None:
+                continue
+            seen_message_ids.add(inspected_id)
+            inspected_rows.append(attachment_row)
+
+    if not inspected_rows:
+        return ""
+
+    lines = []
+    for row in inspected_rows[-3:]:
+        summary = re.sub(r"\s+", " ", str(row["content"] or "")).strip()
+        if len(summary) > 120:
+            summary = summary[:117].rstrip() + "..."
+        if summary:
+            lines.append(f"- Message {int(row['id'])}: {summary}")
+        else:
+            lines.append(f"- Message {int(row['id'])}: [attachment]")
+
+    if not lines:
+        return ""
+
+    prompt = (
+        "\n\nAttachment guidance:\n"
+        "These attachments were already inspected with tools recently:\n"
+        f"{chr(10).join(lines)}\n"
+        "Do not use tools to reopen or reprocess the same attachment again unless the user explicitly asks "
+        "to analyze, inspect, describe, or read it again. Prefer answering from the already available context."
+    )
+    if current_user_message is None or not message_content_has_inspectable_attachments(current_user_message.content):
+        prompt += (
+            "\n- No new attachment is uploaded in the current user turn."
+            "\n- Treat the user's message as a follow-up about the already-seen attachment(s) above unless they clearly ask for a fresh inspection."
+            "\n- Do not speak as if they just brought, shared, uploaded, or sent you a new image or file."
+            "\n- Do not offer to open, explore, or take a closer look again unless the user explicitly asks for renewed analysis."
+        )
+    return prompt
+
+
+def build_current_attachment_prompt(current_user_message: Optional[Message]) -> str:
+    if current_user_message is None:
+        return ""
+
+    content = current_user_message.content
+    has_image = message_content_has_image_attachment(content)
+    has_file = message_content_has_file_attachment(content)
+    reinspect_message_ids = metadata_reinspect_message_ids(getattr(current_user_message, "metadata", None))
+    if not has_image and not has_file and not reinspect_message_ids:
+        return ""
+
+    lines = ["\n\nCurrent-turn attachment guidance:"]
+    if reinspect_message_ids:
+        lines.append(
+            "- The user explicitly asked to reanalyze an earlier attachment in this turn."
+        )
+        lines.append(
+            "- Reinspect the requested earlier attachment now and answer the user's current question in this same response."
+        )
+        lines.append(
+            "- Do not give a placeholder reply such as 'one moment', 'let me take a closer look', or similar unless tool access actually fails."
+        )
+        lines.append(
+            "- If you use Python or another tool during reanalysis, complete the reanalysis and then provide the substantive answer immediately."
+        )
+    if has_image:
+        lines.append(
+            "- An image is attached in the current user turn. Analyze the attached image directly and answer from what is visibly present."
+        )
+        lines.append(
+            "- Do not say that you cannot see the image, cannot view it fully, or need the user to describe it unless the image payload is actually missing or unreadable."
+        )
+    if has_file:
+        lines.append(
+            "- A file is attached in the current user turn. Use the attached file content directly when it is relevant."
+        )
+    if reinspect_message_ids:
+        lines.append(
+            "- Use tools only as needed to complete the reanalysis, but do not stop at announcing that you will inspect the attachment."
+        )
+    else:
+        lines.append(
+            "- Only use Python or file tools for deeper inspection when the user asks for analysis or when direct inspection is insufficient."
+        )
+    return "\n".join(lines)
+
+
 def _memory_recency_bonus(memory: MemoryRecord) -> float:
     timestamp = memory.updated_at or memory.created_at
     if not timestamp:
@@ -2603,7 +3102,11 @@ def _memory_recency_bonus(memory: MemoryRecord) -> float:
         updated = datetime.fromisoformat(timestamp)
     except ValueError:
         return 0.0
-    age_days = max(0.0, (datetime.utcnow() - updated).total_seconds() / 86400.0)
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    else:
+        updated = updated.astimezone(timezone.utc)
+    age_days = max(0.0, (datetime.now(timezone.utc) - updated).total_seconds() / 86400.0)
     return max(0.0, 0.08 - min(age_days, 30.0) * 0.002)
 
 
@@ -2698,6 +3201,7 @@ def build_system_prompt(
     query: Optional[str] = None,
     *,
     conversation_id: Optional[str] = None,
+    current_user_message: Optional[Message] = None,
 ) -> str:
     if query and EMBEDDINGS_ENABLED:
         memories = find_relevant_memories(conn, query, conversation_id=conversation_id)
@@ -2725,7 +3229,15 @@ def build_system_prompt(
     else:
         memories_text = "- (none)"
 
-    return SYSTEM_PROMPT_TEMPLATE.format(memories=memories_text)
+    prompt = SYSTEM_PROMPT_TEMPLATE.format(memories=memories_text)
+    prompt += build_recent_attachment_guard_prompt(
+        conn,
+        conversation_id,
+        query,
+        current_user_message=current_user_message,
+    )
+    prompt += build_current_attachment_prompt(current_user_message)
+    return prompt
 
 
 def _message_to_response_input(message: Message) -> dict:
