@@ -9,6 +9,7 @@ import secrets
 import time
 import shlex
 import re
+from typing import Optional
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,6 +29,7 @@ from core import (
     add_message_returning_id,
     auto_extract_memory_suggestions_from_user_text,
     build_system_prompt,
+    build_replay_history_from_rows,
     build_user_content,
     call_openai,
     call_openai_image,
@@ -40,6 +42,8 @@ from core import (
     delete_memory,
     delete_memory_suggestion,
     delete_memory_suggestions_from_message_id,
+    deserialize_message_metadata,
+    extract_message_attachment_cards,
     fetch_container_file_content,
     get_all_messages_with_ids,
     get_conversation_title,
@@ -47,6 +51,8 @@ from core import (
     get_message_row,
     get_previous_user_message_row,
     get_recent_messages,
+    get_recent_message_rows_with_ids,
+    infer_inspected_attachment_message_ids,
     init_db,
     list_conversations,
     list_memories,
@@ -55,6 +61,7 @@ from core import (
     message_from_row,
     normalize_chat_model,
     reasoning_model_supported,
+    raw_content_has_inspectable_attachments,
     replace_message_from_id,
     resolve_chat_settings,
     search_conversations,
@@ -560,9 +567,34 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             title = get_conversation_title(conn, conversation_id)
             messages = []
-            for row in get_all_messages_with_ids(conn, conversation_id):
+            rows = get_all_messages_with_ids(conn, conversation_id)
+            inspected_attachment_message_ids = set()
+            for row in rows:
+                metadata = deserialize_message_metadata(row["metadata"])
+                for raw_id in list(metadata.get("inspected_attachment_message_ids") or []):
+                    try:
+                        message_id = int(raw_id)
+                    except (TypeError, ValueError):
+                        continue
+                    if message_id > 0:
+                        inspected_attachment_message_ids.add(message_id)
+
+            for row in rows:
                 message = message_from_row(row)
                 metadata = message.metadata or {}
+                has_inspectable_attachments = raw_content_has_inspectable_attachments(
+                    row["raw_content"],
+                    row["content"],
+                )
+                attachment_status = None
+                if row["role"] == "user" and has_inspectable_attachments:
+                    inspected = int(row["id"]) in inspected_attachment_message_ids
+                    attachment_status = {
+                        "attached": True,
+                        "inspected": inspected,
+                        "suppressed_on_followups": inspected,
+                        "reanalyze_available": True,
+                    }
                 messages.append(
                     {
                         "id": row["id"],
@@ -574,6 +606,9 @@ class ChatHandler(BaseHTTPRequestHandler):
                         "requested_model": str(metadata.get("requested_model") or "").strip(),
                         "reasoning_enabled": bool(metadata.get("reasoning_enabled", False)),
                         "reasoning_effort": str(metadata.get("reasoning_effort") or "").strip(),
+                        "has_inspectable_attachments": has_inspectable_attachments,
+                        "attachments": extract_message_attachment_cards(message.content),
+                        "attachment_status": attachment_status,
                         "file_search_status": get_message_file_search_status(conn, row["raw_content"]),
                         "created_at": row["created_at"],
                     }
@@ -718,8 +753,22 @@ class ChatHandler(BaseHTTPRequestHandler):
             reasoning_effort=payload.get("reasoning_effort"),
         )
 
-    def _assistant_metadata(self, response_text, chat_options: dict) -> dict:
-        return {
+    def _parse_reinspect_message_ids(self, payload: dict) -> list[int]:
+        parsed: list[int] = []
+        seen = set()
+        for raw_id in list(payload.get("reinspect_message_ids") or []):
+            try:
+                message_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if message_id <= 0 or message_id in seen:
+                continue
+            seen.add(message_id)
+            parsed.append(message_id)
+        return parsed
+
+    def _assistant_metadata(self, response_text, chat_options: dict, inspected_attachment_message_ids: Optional[list[int]] = None) -> dict:
+        metadata = {
             "tools_used": response_text.tools_used,
             "activity_log": response_text.activity_log,
             "model": response_text.model,
@@ -727,6 +776,13 @@ class ChatHandler(BaseHTTPRequestHandler):
             "reasoning_enabled": bool(chat_options.get("reasoning_enabled")),
             "reasoning_effort": response_text.reasoning_effort,
         }
+        if inspected_attachment_message_ids:
+            metadata["inspected_attachment_message_ids"] = [
+                int(message_id)
+                for message_id in inspected_attachment_message_ids
+                if int(message_id) > 0
+            ]
+        return metadata
 
     def _handle_create_conversation(self) -> dict:
         with connect_db() as conn:
@@ -931,6 +987,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         web_search_mode = "off"
         enable_code_interpreter = bool(payload.get("enable_code_interpreter", True))
         chat_options = self._resolve_chat_options(payload)
+        reinspect_message_ids = self._parse_reinspect_message_ids(payload)
         if content.lower().startswith("/web "):
             web_search_mode = "force"
             content = content[5:].strip()
@@ -938,16 +995,25 @@ class ChatHandler(BaseHTTPRequestHandler):
             web_search_mode = "auto"
 
         user_message = self._build_user_message(content, attachments)
+        if reinspect_message_ids:
+            user_message.metadata = {"reinspect_message_ids": reinspect_message_ids}
 
         with connect_db() as conn:
             if not conversation_exists(conn, conversation_id):
                 raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
 
-            history = get_recent_messages(conn, conversation_id)
+            history_rows = get_recent_message_rows_with_ids(conn, conversation_id)
+            history = build_replay_history_from_rows(
+                history_rows,
+                query=content or "Attachment upload",
+                current_user_message=user_message,
+                reinspect_message_ids=reinspect_message_ids,
+            )
             system_prompt = build_system_prompt(
                 conn,
                 content or "Attachment upload",
                 conversation_id=conversation_id,
+                current_user_message=user_message,
             )
             messages = [Message("system", system_prompt), *history, user_message]
 
@@ -974,13 +1040,25 @@ class ChatHandler(BaseHTTPRequestHandler):
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                 ) from exc
 
+            inspected_attachment_message_ids = infer_inspected_attachment_message_ids(
+                history_rows,
+                current_user_message_id=user_message_id,
+                current_user_message=user_message,
+                tools_used=response_text.tools_used,
+                response_text=response_text.text,
+            )
+
             add_message(
                 conn,
                 conversation_id,
                 Message(
                     "assistant",
                     response_text.text,
-                    self._assistant_metadata(response_text, chat_options),
+                    self._assistant_metadata(
+                        response_text,
+                        chat_options,
+                        inspected_attachment_message_ids,
+                    ),
                 ),
             )
 
@@ -1018,6 +1096,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         web_search_mode = "off"
         enable_code_interpreter = bool(payload.get("enable_code_interpreter", True))
         chat_options = self._resolve_chat_options(payload)
+        reinspect_message_ids = self._parse_reinspect_message_ids(payload)
         if content.lower().startswith("/web "):
             web_search_mode = "force"
             content = content[5:].strip()
@@ -1025,16 +1104,25 @@ class ChatHandler(BaseHTTPRequestHandler):
             web_search_mode = "auto"
 
         user_message = self._build_user_message(content, attachments)
+        if reinspect_message_ids:
+            user_message.metadata = {"reinspect_message_ids": reinspect_message_ids}
 
         with connect_db() as conn:
             if not conversation_exists(conn, conversation_id):
                 raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
 
-            history = get_recent_messages(conn, conversation_id)
+            history_rows = get_recent_message_rows_with_ids(conn, conversation_id)
+            history = build_replay_history_from_rows(
+                history_rows,
+                query=content or "Attachment upload",
+                current_user_message=user_message,
+                reinspect_message_ids=reinspect_message_ids,
+            )
             system_prompt = build_system_prompt(
                 conn,
                 content or "Attachment upload",
                 conversation_id=conversation_id,
+                current_user_message=user_message,
             )
             messages = [Message("system", system_prompt), *history, user_message]
             user_message_id = add_message_returning_id(conn, conversation_id, user_message)
@@ -1079,6 +1167,13 @@ class ChatHandler(BaseHTTPRequestHandler):
                         response_reasoning_effort = str(
                             event.get("reasoning_effort") or chat_options["reasoning_effort"] or ""
                         ).strip() or None
+                        inspected_attachment_message_ids = infer_inspected_attachment_message_ids(
+                            history_rows,
+                            current_user_message_id=user_message_id,
+                            current_user_message=user_message,
+                            tools_used=tools_used,
+                            response_text=final_text,
+                        )
                         add_message(
                             conn,
                             conversation_id,
@@ -1092,6 +1187,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                                     "requested_model": chat_options["requested_model"],
                                     "reasoning_enabled": chat_options["reasoning_enabled"],
                                     "reasoning_effort": response_reasoning_effort,
+                                    "inspected_attachment_message_ids": inspected_attachment_message_ids,
                                 },
                             ),
                         )
@@ -1177,6 +1273,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         web_search_mode = "off"
         enable_code_interpreter = bool(payload.get("enable_code_interpreter", True))
         chat_options = self._resolve_chat_options(payload)
+        reinspect_message_ids = self._parse_reinspect_message_ids(payload)
         if content.lower().startswith("/web "):
             web_search_mode = "force"
             content = content[5:].strip()
@@ -1184,6 +1281,8 @@ class ChatHandler(BaseHTTPRequestHandler):
             web_search_mode = "auto"
 
         user_message = self._build_user_message(content, attachments)
+        if reinspect_message_ids:
+            user_message.metadata = {"reinspect_message_ids": reinspect_message_ids}
 
         with connect_db() as conn:
             if not conversation_exists(conn, conversation_id):
@@ -1196,16 +1295,19 @@ class ChatHandler(BaseHTTPRequestHandler):
                 raise ApiError("Only user messages can be edited")
 
             history_rows = get_all_messages_with_ids(conn, conversation_id)
-            history = []
-            for row in history_rows:
-                if row["id"] >= message_id:
-                    break
-                history.append(message_from_row(row))
+            history_rows = [row for row in history_rows if row["id"] < message_id]
+            history = build_replay_history_from_rows(
+                history_rows,
+                query=content or "Attachment upload",
+                current_user_message=user_message,
+                reinspect_message_ids=reinspect_message_ids,
+            )
 
             system_prompt = build_system_prompt(
                 conn,
                 content or "Attachment upload",
                 conversation_id=conversation_id,
+                current_user_message=user_message,
             )
             messages = [Message("system", system_prompt), *history, user_message]
 
@@ -1237,13 +1339,25 @@ class ChatHandler(BaseHTTPRequestHandler):
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                 ) from exc
 
+            inspected_attachment_message_ids = infer_inspected_attachment_message_ids(
+                history_rows,
+                current_user_message_id=message_id,
+                current_user_message=user_message,
+                tools_used=response_text.tools_used,
+                response_text=response_text.text,
+            )
+
             assistant_id = add_message_returning_id(
                 conn,
                 conversation_id,
                 Message(
                     "assistant",
                     response_text.text,
-                    self._assistant_metadata(response_text, chat_options),
+                    self._assistant_metadata(
+                        response_text,
+                        chat_options,
+                        inspected_attachment_message_ids,
+                    ),
                 ),
             )
 
@@ -1345,11 +1459,12 @@ class ChatHandler(BaseHTTPRequestHandler):
                 }
 
             history_rows = get_all_messages_with_ids(conn, conversation_id)
-            history = []
-            for row in history_rows:
-                if row["id"] >= user_row["id"]:
-                    break
-                history.append(message_from_row(row))
+            history_rows = [row for row in history_rows if row["id"] < user_row["id"]]
+            history = build_replay_history_from_rows(
+                history_rows,
+                query=original_content or "Regenerate response",
+                current_user_message=original_user_message,
+            )
 
             web_search_mode = "off"
             if original_content.lower().startswith("/web "):
@@ -1361,6 +1476,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 conn,
                 original_content or "Regenerate response",
                 conversation_id=conversation_id,
+                current_user_message=original_user_message,
             )
             messages = [Message("system", system_prompt), *history, original_user_message]
 
@@ -1385,6 +1501,14 @@ class ChatHandler(BaseHTTPRequestHandler):
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                 ) from exc
 
+            inspected_attachment_message_ids = infer_inspected_attachment_message_ids(
+                history_rows,
+                current_user_message_id=int(user_row["id"]),
+                current_user_message=original_user_message,
+                tools_used=response_text.tools_used,
+                response_text=response_text.text,
+            )
+
             conn.execute(
                 "DELETE FROM messages WHERE conversation_id = ? AND id >= ?",
                 (conversation_id, message_id),
@@ -1398,7 +1522,11 @@ class ChatHandler(BaseHTTPRequestHandler):
                 Message(
                     "assistant",
                     response_text.text,
-                    self._assistant_metadata(response_text, chat_options),
+                    self._assistant_metadata(
+                        response_text,
+                        chat_options,
+                        inspected_attachment_message_ids,
+                    ),
                 ),
             )
 
@@ -1468,11 +1596,12 @@ class ChatHandler(BaseHTTPRequestHandler):
                 return
 
             history_rows = get_all_messages_with_ids(conn, conversation_id)
-            history = []
-            for row in history_rows:
-                if row["id"] >= user_row["id"]:
-                    break
-                history.append(message_from_row(row))
+            history_rows = [row for row in history_rows if row["id"] < user_row["id"]]
+            history = build_replay_history_from_rows(
+                history_rows,
+                query=original_content or "Regenerate response",
+                current_user_message=original_user_message,
+            )
 
             web_search_mode = "off"
             if original_content.lower().startswith("/web "):
@@ -1484,6 +1613,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 conn,
                 original_content or "Regenerate response",
                 conversation_id=conversation_id,
+                current_user_message=original_user_message,
             )
             messages = [Message("system", system_prompt), *history, original_user_message]
 
@@ -1528,6 +1658,13 @@ class ChatHandler(BaseHTTPRequestHandler):
                         response_reasoning_effort = str(
                             event.get("reasoning_effort") or chat_options["reasoning_effort"] or ""
                         ).strip() or None
+                        inspected_attachment_message_ids = infer_inspected_attachment_message_ids(
+                            history_rows,
+                            current_user_message_id=int(user_row["id"]),
+                            current_user_message=original_user_message,
+                            tools_used=tools_used,
+                            response_text=final_text,
+                        )
 
                         conn.execute(
                             "DELETE FROM messages WHERE conversation_id = ? AND id >= ?",
@@ -1549,6 +1686,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                                     "requested_model": chat_options["requested_model"],
                                     "reasoning_enabled": chat_options["reasoning_enabled"],
                                     "reasoning_effort": response_reasoning_effort,
+                                    "inspected_attachment_message_ids": inspected_attachment_message_ids,
                                 },
                             ),
                         )
