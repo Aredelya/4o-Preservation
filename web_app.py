@@ -1135,6 +1135,63 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             self._send_sse_headers()
 
+            if chat_options["reasoning_enabled"] and web_search_mode != "off":
+                try:
+                    self._send_sse_event({"type": "status", "status": "reasoning"})
+                    response_text = call_openai(
+                        messages,
+                        web_search_mode=web_search_mode,
+                        enable_code_interpreter=enable_code_interpreter,
+                        model=chat_options["model"],
+                        reasoning_effort=chat_options["reasoning_effort"],
+                    )
+                    inspected_attachment_message_ids = infer_inspected_attachment_message_ids(
+                        history_rows,
+                        current_user_message_id=user_message_id,
+                        current_user_message=user_message,
+                        tools_used=response_text.tools_used,
+                        response_text=response_text.text,
+                    )
+                    add_message(
+                        conn,
+                        conversation_id,
+                        Message(
+                            "assistant",
+                            response_text.text,
+                            {
+                                "tools_used": response_text.tools_used,
+                                "activity_log": response_text.activity_log,
+                                "model": response_text.model,
+                                "requested_model": chat_options["requested_model"],
+                                "reasoning_enabled": chat_options["reasoning_enabled"],
+                                "reasoning_effort": response_text.reasoning_effort,
+                                "inspected_attachment_message_ids": inspected_attachment_message_ids,
+                            },
+                        ),
+                    )
+                    self._send_sse_event(
+                        {
+                            "type": "done",
+                            "assistant_message": {
+                                "role": "assistant",
+                                "content": response_text.text,
+                                "tools_used": response_text.tools_used,
+                                "activity_log": response_text.activity_log,
+                                "model": response_text.model,
+                                "requested_model": chat_options["requested_model"],
+                                "reasoning_enabled": chat_options["reasoning_enabled"],
+                                "reasoning_effort": response_text.reasoning_effort,
+                            },
+                        }
+                    )
+                except Exception:
+                    logger.exception(
+                        "Reasoning send fallback failed for conversation %s",
+                        conversation_id,
+                    )
+                    self._send_sse_event({"type": "error", "error": "Assistant request failed"})
+                return
+
             full_text = ""
             try:
                 for event in stream_openai(
@@ -1618,6 +1675,76 @@ class ChatHandler(BaseHTTPRequestHandler):
             messages = [Message("system", system_prompt), *history, original_user_message]
 
             self._send_sse_headers()
+
+            if chat_options["reasoning_enabled"] and web_search_mode != "off":
+                try:
+                    self._send_sse_event({"type": "status", "status": "reasoning"})
+                    response_text = call_openai(
+                        messages,
+                        web_search_mode=web_search_mode,
+                        enable_code_interpreter=enable_code_interpreter,
+                        model=chat_options["model"],
+                        reasoning_effort=chat_options["reasoning_effort"],
+                    )
+
+                    inspected_attachment_message_ids = infer_inspected_attachment_message_ids(
+                        history_rows,
+                        current_user_message_id=int(user_row["id"]),
+                        current_user_message=original_user_message,
+                        tools_used=response_text.tools_used,
+                        response_text=response_text.text,
+                    )
+
+                    conn.execute(
+                        "DELETE FROM messages WHERE conversation_id = ? AND id >= ?",
+                        (conversation_id, message_id),
+                    )
+                    delete_memory_suggestions_from_message_id(conn, conversation_id, message_id, include_current=True)
+                    cleanup_orphaned_attachments(conn)
+
+                    assistant_id = add_message_returning_id(
+                        conn,
+                        conversation_id,
+                        Message(
+                            "assistant",
+                            response_text.text,
+                            self._assistant_metadata(
+                                response_text,
+                                chat_options,
+                                inspected_attachment_message_ids,
+                            ),
+                        ),
+                    )
+
+                    self._send_sse_event(
+                        {
+                            "type": "done",
+                            "assistant_message": {
+                                "id": assistant_id,
+                                "role": "assistant",
+                                "content": response_text.text,
+                                "tools_used": response_text.tools_used,
+                                "activity_log": response_text.activity_log,
+                                "model": response_text.model,
+                                "requested_model": chat_options["requested_model"],
+                                "reasoning_enabled": chat_options["reasoning_enabled"],
+                                "reasoning_effort": response_text.reasoning_effort,
+                            },
+                            "source_user_message": {
+                                "id": user_row["id"],
+                                "role": "user",
+                                "content": original_content,
+                            },
+                        }
+                    )
+                except Exception:
+                    logger.exception(
+                        "Reasoning regenerate fallback failed for message %s in conversation %s",
+                        message_id,
+                        conversation_id,
+                    )
+                    self._send_sse_event({"type": "error", "error": "Assistant request failed"})
+                return
 
             full_text = ""
             try:
