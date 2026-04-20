@@ -431,6 +431,218 @@ h2 {
   font-size: 0.85rem;
 }
 
+.attachment-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(78ch, 84%);
+}
+
+.message-row.user .attachment-card-list {
+  align-self: flex-end;
+}
+
+.attachment-card {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+  padding: 10px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.035);
+  overflow: hidden;
+}
+
+.attachment-card.image {
+  background: linear-gradient(180deg, rgba(122, 162, 255, 0.08), rgba(255, 255, 255, 0.03));
+}
+
+.attachment-card.file {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.025));
+}
+
+.attachment-card-thumb-wrap {
+  flex: 0 0 112px;
+  width: 112px;
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  cursor: zoom-in;
+}
+
+.attachment-card-thumb {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 84px;
+  max-height: 112px;
+  object-fit: cover;
+}
+
+.attachment-card-icon {
+  flex: 0 0 70px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 70px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.055);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(236, 242, 255, 0.92);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.attachment-card-body {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.attachment-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.attachment-card-action {
+  padding: 7px 10px;
+  font-size: 0.82rem;
+}
+
+.attachment-card-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: rgba(245, 248, 255, 0.96);
+  overflow-wrap: anywhere;
+}
+
+.attachment-card-meta {
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.62);
+  overflow-wrap: anywhere;
+}
+
+.attachment-card-excerpt {
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: rgba(240, 245, 255, 0.78);
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.attachment-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(6, 10, 18, 0.78);
+  backdrop-filter: blur(6px);
+}
+
+.attachment-lightbox[hidden] {
+  display: none !important;
+}
+
+.attachment-lightbox-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: min(92vw, 1100px);
+  max-height: 92vh;
+}
+
+.attachment-lightbox-close {
+  align-self: flex-end;
+}
+
+.attachment-lightbox-image {
+  display: block;
+  max-width: 100%;
+  max-height: calc(92vh - 56px);
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.42);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.attachment-preview {
+  position: fixed;
+  inset: 0;
+  z-index: 82;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(6, 10, 18, 0.78);
+  backdrop-filter: blur(6px);
+}
+
+.attachment-preview[hidden] {
+  display: none !important;
+}
+
+.attachment-preview-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(96vw, 1040px);
+  max-height: 92vh;
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: linear-gradient(180deg, rgba(17, 23, 35, 0.98), rgba(11, 16, 26, 0.99));
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.42);
+}
+
+.attachment-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.attachment-preview-title {
+  min-width: 0;
+  font-size: 0.96rem;
+  font-weight: 600;
+  color: rgba(245, 248, 255, 0.96);
+  overflow-wrap: anywhere;
+}
+
+.attachment-preview-frame {
+  width: 100%;
+  min-height: 72vh;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: #fff;
+}
+
+.attachment-preview-text {
+  margin: 0;
+  width: 100%;
+  max-height: 72vh;
+  overflow: auto;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(245, 248, 255, 0.94);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+
 .composer {
 
  display: grid;
@@ -1875,5 +2087,276 @@ h2 {
   textarea#messageInput {
     min-height: 44px !important;
     max-height: 72px !important;
+  }
+
+  .attachment-card-list {
+    width: 100%;
+  }
+
+  .attachment-card {
+    padding: 9px;
+    gap: 10px;
+  }
+
+  .attachment-card-thumb-wrap {
+    flex-basis: 92px;
+    width: 92px;
+  }
+
+  .attachment-card-icon {
+    flex-basis: 60px;
+    min-height: 60px;
+  }
+
+  .attachment-lightbox {
+    padding: 12px;
+  }
+
+  .attachment-preview {
+    padding: 12px;
+  }
+
+  .attachment-preview-dialog {
+    width: 100%;
+    max-height: 94vh;
+    padding: 12px;
+  }
+
+  .attachment-preview-frame {
+    min-height: 60vh;
+  }
+}
+
+/* --- Composer redesign --- */
+.panel-chat .composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.95fr);
+  gap: 12px;
+  align-items: start;
+  padding: 12px;
+  margin-top: auto;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(16, 22, 34, 0.96), rgba(11, 16, 26, 0.98));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.composer-main {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.panel-chat .composer textarea#messageInput {
+  min-height: 112px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.composer-context {
+  display: flex;
+  align-items: center;
+  min-height: 0;
+}
+
+.composer-context[hidden] {
+  display: none;
+}
+
+.composer-context-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.composer-context-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  line-height: 1.2;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(240, 245, 255, 0.9);
+}
+
+.composer-context-chip.reanalyze {
+  border-color: rgba(213, 154, 255, 0.24);
+  background: rgba(115, 76, 160, 0.18);
+  color: rgba(246, 231, 255, 0.94);
+}
+
+.composer-context-chip.editing {
+  border-color: rgba(123, 189, 255, 0.24);
+  background: rgba(67, 123, 204, 0.16);
+  color: rgba(224, 237, 255, 0.94);
+}
+
+.composer-context-chip.attachments {
+  border-color: rgba(103, 206, 138, 0.24);
+  background: rgba(59, 137, 88, 0.16);
+  color: rgba(226, 255, 236, 0.94);
+}
+
+.composer-context-remove {
+  padding: 0;
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 0.95rem;
+  line-height: 1;
+  opacity: 0.8;
+}
+
+.composer-context-remove:hover:not(:disabled) {
+  transform: none;
+  opacity: 1;
+}
+
+.composer-footer {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.composer-file-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: min(100%, 320px);
+  color: var(--muted);
+  font-size: 0.83rem;
+}
+
+.composer-section-label,
+.composer-card-title {
+  font-size: 0.74rem;
+  line-height: 1.2;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.52);
+}
+
+.composer #fileInput {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.composer-tools {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.composer-tool-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.composer-toggles,
+.composer-model-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+}
+
+.composer-setting {
+  flex: 1 1 150px;
+  min-width: 0;
+}
+
+.composer-setting select {
+  width: 100%;
+}
+
+.reasoning-toggle {
+  min-height: 42px;
+  align-self: end;
+}
+
+@media (max-width: 1100px) and (orientation: portrait) {
+  .panel-chat .composer {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .panel-chat .composer {
+    grid-template-columns: 1fr !important;
+    gap: 8px !important;
+    padding: 8px !important;
+    border-radius: 16px !important;
+  }
+
+  .panel-chat .composer textarea#messageInput {
+    min-height: 58px !important;
+    max-height: 124px !important;
+  }
+
+  .composer-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .composer-file-field {
+    min-width: 0;
+  }
+
+  .composer-actions {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .composer-actions button,
+  #sendMessage {
+    flex: 1 1 0;
+  }
+
+  .composer-tools {
+    display: none;
+  }
+
+  .composer-tools.open {
+    display: grid !important;
+  }
+
+  .composer-tool-card {
+    padding: 10px;
+    border-radius: 14px;
+  }
+
+  .composer-model-controls,
+  .composer-toggles {
+    display: grid !important;
+    grid-template-columns: 1fr;
+    gap: 8px;
   }
 }
