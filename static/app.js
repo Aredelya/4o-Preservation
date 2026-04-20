@@ -14,6 +14,7 @@ const state = {
   activeChatSearchIndex: -1,
   activeStreamController: null,
   activeStreamKind: null,
+  pendingReinspectMessageIds: [],
 };
 
 let conversationSearchTimer = null;
@@ -33,6 +34,8 @@ const messageList = document.getElementById("messageList");
 const conversationTitle = document.getElementById("conversationTitle");
 const messageInput = document.getElementById("messageInput");
 const fileInput = document.getElementById("fileInput");
+const composerContext = document.getElementById("composerContext");
+const composerContextChips = document.getElementById("composerContextChips");
 const imageCommandHint = document.getElementById("imageCommandHint");
 const newConversationBtn = document.getElementById("newConversation");
 const sendMessageBtn = document.getElementById("sendMessage");
@@ -66,6 +69,7 @@ const REASONING_EFFORT_STORAGE_KEY = "chat-reasoning-effort";
 const setEditingState = (messageId = null) => {
   state.editingMessageId = messageId;
   sendMessageBtn.textContent = messageId ? "Save & resend" : "Send";
+  updateComposerContext();
 };
 
 const getStoredBoolean = (key, fallback = false) => {
@@ -915,6 +919,159 @@ const inferImageExtension = (src = "") => {
   return "png";
 };
 
+let attachmentLightboxElements = null;
+let attachmentPreviewElements = null;
+
+const ensureAttachmentLightbox = () => {
+  if (attachmentLightboxElements) return attachmentLightboxElements;
+
+  const overlay = document.createElement("div");
+  overlay.className = "attachment-lightbox";
+  overlay.hidden = true;
+
+  const dialog = document.createElement("div");
+  dialog.className = "attachment-lightbox-dialog";
+
+  const closeButton = document.createElement("button");
+  closeButton.type = "button";
+  closeButton.className = "secondary attachment-lightbox-close";
+  closeButton.textContent = "Close";
+
+  const image = document.createElement("img");
+  image.className = "attachment-lightbox-image";
+  image.alt = "";
+
+  closeButton.onclick = () => {
+    overlay.hidden = true;
+    image.removeAttribute("src");
+    image.alt = "";
+  };
+
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) {
+      closeButton.click();
+    }
+  });
+
+  dialog.appendChild(closeButton);
+  dialog.appendChild(image);
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && attachmentLightboxElements && !attachmentLightboxElements.overlay.hidden) {
+      attachmentLightboxElements.closeButton.click();
+    }
+  });
+
+  attachmentLightboxElements = { overlay, dialog, closeButton, image };
+  return attachmentLightboxElements;
+};
+
+const openAttachmentLightbox = (src, alt = "Attachment preview") => {
+  if (!src) return;
+  const lightbox = ensureAttachmentLightbox();
+  lightbox.image.src = src;
+  lightbox.image.alt = alt;
+  lightbox.overlay.hidden = false;
+};
+
+const ensureAttachmentPreview = () => {
+  if (attachmentPreviewElements) return attachmentPreviewElements;
+
+  const overlay = document.createElement("div");
+  overlay.className = "attachment-preview";
+  overlay.hidden = true;
+
+  const dialog = document.createElement("div");
+  dialog.className = "attachment-preview-dialog";
+
+  const header = document.createElement("div");
+  header.className = "attachment-preview-header";
+
+  const title = document.createElement("div");
+  title.className = "attachment-preview-title";
+
+  const closeButton = document.createElement("button");
+  closeButton.type = "button";
+  closeButton.className = "secondary attachment-preview-close";
+  closeButton.textContent = "Close";
+
+  const iframe = document.createElement("iframe");
+  iframe.className = "attachment-preview-frame";
+  iframe.hidden = true;
+  iframe.setAttribute("title", "Attachment preview");
+
+  const pre = document.createElement("pre");
+  pre.className = "attachment-preview-text";
+  pre.hidden = true;
+
+  closeButton.onclick = () => {
+    overlay.hidden = true;
+    title.textContent = "";
+    iframe.hidden = true;
+    iframe.removeAttribute("src");
+    pre.hidden = true;
+    pre.textContent = "";
+  };
+
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) {
+      closeButton.click();
+    }
+  });
+
+  header.appendChild(title);
+  header.appendChild(closeButton);
+  dialog.appendChild(header);
+  dialog.appendChild(iframe);
+  dialog.appendChild(pre);
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && attachmentPreviewElements && !attachmentPreviewElements.overlay.hidden) {
+      attachmentPreviewElements.closeButton.click();
+    }
+  });
+
+  attachmentPreviewElements = { overlay, dialog, title, closeButton, iframe, pre };
+  return attachmentPreviewElements;
+};
+
+const openAttachmentPreview = ({ title = "Attachment preview", pdfUrl = "", text = "" } = {}) => {
+  const preview = ensureAttachmentPreview();
+  preview.title.textContent = title;
+
+  if (pdfUrl) {
+    preview.iframe.src = pdfUrl;
+    preview.iframe.hidden = false;
+    preview.pre.hidden = true;
+    preview.pre.textContent = "";
+  } else {
+    preview.iframe.hidden = true;
+    preview.iframe.removeAttribute("src");
+    preview.pre.hidden = false;
+    preview.pre.textContent = text || "";
+  }
+
+  preview.overlay.hidden = false;
+};
+
+const primeAttachmentReanalyze = (messageId) => {
+  if (!messageId) return;
+  state.pendingReinspectMessageIds = [messageId];
+  updateComposerContext();
+  setEditingState(null);
+  if (!messageInput.value.trim()) {
+    messageInput.value = "Please reanalyze the earlier attachment.";
+  }
+  updateImageCommandHint();
+  messageInput.focus();
+  messageInput.setSelectionRange(messageInput.value.length, messageInput.value.length);
+  setStatus("Next send will reanalyze that attachment.", "", 2200);
+};
+
 const addImageDownloadActions = (wrap, bubble, message) => {
   if (!wrap || !bubble || !message || message.role !== "assistant") return;
 
@@ -962,6 +1119,7 @@ const setComposerBusy = (busy) => {
 
 const clearDraftAttachments = () => {
   fileInput.value = "";
+  updateComposerContext();
 };
 
 const isImageCommandDraft = (value = "") =>
@@ -974,10 +1132,88 @@ const updateImageCommandHint = () => {
   imageCommandHint.setAttribute("aria-hidden", visible ? "false" : "true");
 };
 
+const clearPendingReinspectTargets = () => {
+  state.pendingReinspectMessageIds = [];
+  updateComposerContext();
+};
+
+const updateComposerContext = () => {
+  if (!composerContext || !composerContextChips) return;
+
+  composerContextChips.innerHTML = "";
+  const chips = [];
+
+  if (state.editingMessageId) {
+    chips.push({
+      label: `Editing message #${state.editingMessageId}`,
+      className: "editing",
+      removable: true,
+      onRemove: () => cancelEditingMessage(),
+      title: "You are editing an earlier user message.",
+    });
+  }
+
+  const pendingReinspectIds = Array.isArray(state.pendingReinspectMessageIds)
+    ? state.pendingReinspectMessageIds.filter((value) => Number(value) > 0)
+    : [];
+  if (pendingReinspectIds.length) {
+    chips.push({
+      label: pendingReinspectIds.length === 1
+        ? `Reanalyze attachment from message #${pendingReinspectIds[0]}`
+        : `Reanalyze ${pendingReinspectIds.length} earlier attachments`,
+      className: "reanalyze",
+      removable: true,
+      onRemove: () => clearPendingReinspectTargets(),
+      title: "The next send will explicitly reanalyze the selected earlier attachment.",
+    });
+  }
+
+  const selectedFiles = Array.from(fileInput?.files || []);
+  if (selectedFiles.length) {
+    chips.push({
+      label: selectedFiles.length === 1
+        ? "1 attachment ready"
+        : `${selectedFiles.length} attachments ready`,
+      className: "attachments",
+      removable: true,
+      onRemove: () => clearDraftAttachments(),
+      title: selectedFiles.map((file) => file.name).join(", "),
+    });
+  }
+
+  composerContext.hidden = chips.length === 0;
+  if (!chips.length) return;
+
+  for (const chipData of chips) {
+    const chip = document.createElement("div");
+    chip.className = `composer-context-chip ${chipData.className || ""}`.trim();
+    if (chipData.title) {
+      chip.title = chipData.title;
+    }
+
+    const label = document.createElement("span");
+    label.textContent = chipData.label;
+    chip.appendChild(label);
+
+    if (chipData.removable) {
+      const removeButton = document.createElement("button");
+      removeButton.type = "button";
+      removeButton.className = "composer-context-remove";
+      removeButton.setAttribute("aria-label", `Remove ${chipData.label}`);
+      removeButton.textContent = "×";
+      removeButton.onclick = chipData.onRemove;
+      chip.appendChild(removeButton);
+    }
+
+    composerContextChips.appendChild(chip);
+  }
+};
+
 const startEditingMessage = (message) => {
   if (!message || message.role !== "user") return;
 
   state.editingMessageId = message.id;
+  clearPendingReinspectTargets();
   messageInput.value = message.content || "";
   clearDraftAttachments();
   setEditingState(message.id);
@@ -1134,6 +1370,7 @@ const regenerateAssistantMessage = async (message) => {
 
 const cancelEditingMessage = () => {
   setEditingState(null);
+  clearPendingReinspectTargets();
   messageInput.value = "";
   clearDraftAttachments();
   updateImageCommandHint();
@@ -1265,6 +1502,90 @@ const ensureFileSearchStatusStyles = () => {
       flex-wrap: wrap;
     }
 
+    .message-meta-details {
+      width: min(78ch, 84%);
+      margin-top: 4px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.035);
+      overflow: hidden;
+    }
+
+    .message-row.user .message-meta-details {
+      align-self: flex-end;
+    }
+
+    .message-row.assistant .message-meta-details {
+      align-self: flex-start;
+    }
+
+    .message-meta-summary {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 8px 10px;
+      cursor: pointer;
+      list-style: none;
+    }
+
+    .message-meta-summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .message-meta-summary-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.78rem;
+      line-height: 1.2;
+      color: rgba(255, 255, 255, 0.72);
+      white-space: nowrap;
+    }
+
+    .message-meta-summary-label::before {
+      content: "▸";
+      font-size: 0.82rem;
+      color: rgba(255, 255, 255, 0.58);
+      transition: transform 140ms ease;
+    }
+
+    .message-meta-details[open] .message-meta-summary-label::before {
+      transform: rotate(90deg);
+    }
+
+    .message-meta-preview {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+
+    .message-meta-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 0 10px 10px;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .message-meta-section {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .message-meta-section-title {
+      font-size: 0.72rem;
+      line-height: 1.2;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: rgba(255, 255, 255, 0.48);
+      padding-left: 2px;
+      margin-top: 2px;
+    }
+
     .file-search-chip {
       display: inline-flex;
       align-items: center;
@@ -1343,6 +1664,49 @@ const ensureFileSearchStatusStyles = () => {
       background: rgba(255, 255, 255, 0.06);
       color: rgba(255, 255, 255, 0.86);
       white-space: nowrap;
+    }
+
+    .attachment-state-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .attachment-state-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      line-height: 1.2;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: rgba(255, 255, 255, 0.05);
+      color: rgba(255, 255, 255, 0.86);
+      white-space: nowrap;
+    }
+
+    .attachment-state-chip.attached {
+      border-color: rgba(122, 168, 255, 0.22);
+      background: rgba(67, 123, 204, 0.14);
+      color: rgba(222, 236, 255, 0.92);
+    }
+
+    .attachment-state-chip.inspected {
+      border-color: rgba(103, 206, 138, 0.22);
+      background: rgba(59, 137, 88, 0.16);
+      color: rgba(223, 255, 233, 0.9);
+    }
+
+    .attachment-state-chip.suppressed {
+      border-color: rgba(246, 194, 111, 0.22);
+      background: rgba(173, 123, 39, 0.16);
+      color: rgba(255, 238, 208, 0.92);
+    }
+
+    .attachment-state-chip.reanalyze {
+      border-color: rgba(213, 154, 255, 0.2);
+      background: rgba(115, 76, 160, 0.16);
+      color: rgba(244, 226, 255, 0.92);
     }
 
     .activity-timeline {
@@ -1504,6 +1868,367 @@ const normalizeAssistantModelInfo = (message) => {
   return chips;
 };
 
+const normalizeAttachmentStatus = (message) => {
+  if (!message || message.role !== "user" || !message.attachment_status) return [];
+
+  const status = message.attachment_status;
+  const chips = [];
+
+  if (status.attached) {
+    chips.push({
+      className: "attached",
+      label: "Attached",
+      title: "This message includes an image or file attachment.",
+    });
+  }
+
+  if (status.inspected) {
+    chips.push({
+      className: "inspected",
+      label: "Already inspected",
+      title: "The assistant has already analyzed this attachment in a later turn.",
+    });
+  }
+
+  if (status.suppressed_on_followups) {
+    chips.push({
+      className: "suppressed",
+      label: "Skipped on ordinary follow-ups",
+      title: "On ordinary follow-up turns, this attachment is not replayed again unless you explicitly ask to reanalyze it.",
+    });
+  }
+
+  if (status.reanalyze_available) {
+    chips.push({
+      className: "reanalyze",
+      label: "Reanalyze available",
+      title: "Use the Reanalyze action to inspect this attachment again on a later turn.",
+    });
+  }
+
+  return chips;
+};
+
+const normalizeMessageAttachments = (message) => {
+  if (!message || message.role !== "user" || !Array.isArray(message.attachments)) return [];
+
+  return message.attachments
+    .filter((attachment) => attachment && typeof attachment === "object")
+    .map((attachment, index) => {
+      const kind = String(attachment.kind || "").trim().toLowerCase();
+      const label = String(attachment.label || "").trim() || (kind === "image" ? `Image ${index + 1}` : `File ${index + 1}`);
+      const mimeType = String(attachment.mime_type || "").trim();
+      const thumbnailUrl = String(attachment.thumbnail_url || "").trim();
+      const filename = String(attachment.filename || "").trim();
+      const fileUrl = String(attachment.file_url || "").trim();
+      const previewText = String(attachment.preview_text || "").trim();
+      const fullText = String(attachment.full_text || "").trim();
+      const previewDataUrl = String(attachment.preview_data_url || "").trim();
+      const truncated = !!attachment.truncated;
+      return {
+        kind,
+        label,
+        mimeType,
+        thumbnailUrl,
+        filename,
+        fileUrl,
+        previewText,
+        fullText,
+        previewDataUrl,
+        truncated,
+      };
+    })
+    .filter((attachment) => attachment.kind === "image" || attachment.kind === "file" || attachment.kind === "text");
+};
+
+const getAttachmentCardMeta = (attachment) => {
+  if (!attachment) return "";
+
+  if (attachment.kind === "image") {
+    return attachment.mimeType || "Image attachment";
+  }
+
+  if (attachment.kind === "text") {
+    const parts = [attachment.mimeType || "text/plain"];
+    if (attachment.truncated) {
+      parts.push("preview trimmed");
+    }
+    return parts.join(" · ");
+  }
+
+  const parts = [];
+  if (attachment.mimeType && attachment.mimeType !== "application/octet-stream") {
+    parts.push(attachment.mimeType);
+  }
+  if (attachment.fileUrl) {
+    parts.push("linked file");
+  }
+  return parts.join(" · ") || "File attachment";
+};
+
+const createAttachmentCards = (message) => {
+  const attachments = normalizeMessageAttachments(message);
+  if (!attachments.length) return null;
+
+  const list = document.createElement("div");
+  list.className = "attachment-card-list";
+
+  for (const attachment of attachments) {
+    const card = document.createElement("div");
+    card.className = `attachment-card ${attachment.kind}`;
+    if (attachment.fileUrl) {
+      card.title = attachment.fileUrl;
+    }
+
+    if (attachment.kind === "image" && attachment.thumbnailUrl) {
+      const imageWrap = document.createElement("div");
+      imageWrap.className = "attachment-card-thumb-wrap";
+
+      const image = document.createElement("img");
+      image.className = "attachment-card-thumb";
+      image.src = attachment.thumbnailUrl;
+      image.alt = attachment.label;
+      imageWrap.tabIndex = 0;
+      imageWrap.title = `Open ${attachment.label}`;
+      imageWrap.onclick = () => openAttachmentLightbox(attachment.thumbnailUrl, attachment.label);
+      imageWrap.onkeydown = (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          openAttachmentLightbox(attachment.thumbnailUrl, attachment.label);
+        }
+      };
+      imageWrap.appendChild(image);
+      card.appendChild(imageWrap);
+    } else {
+      const icon = document.createElement("div");
+      icon.className = "attachment-card-icon";
+      if (attachment.kind === "text") {
+        icon.textContent = "TEXT";
+      } else {
+        icon.textContent = attachment.mimeType === "application/pdf" ? "PDF" : "FILE";
+      }
+      card.appendChild(icon);
+    }
+
+    const body = document.createElement("div");
+    body.className = "attachment-card-body";
+
+    const title = document.createElement("div");
+    title.className = "attachment-card-title";
+    title.textContent = attachment.filename || attachment.label;
+    body.appendChild(title);
+
+    const meta = document.createElement("div");
+    meta.className = "attachment-card-meta";
+    meta.textContent = getAttachmentCardMeta(attachment);
+    body.appendChild(meta);
+
+    if (attachment.kind === "text" && attachment.previewText) {
+      const excerpt = document.createElement("div");
+      excerpt.className = "attachment-card-excerpt";
+      excerpt.textContent = attachment.previewText;
+      body.appendChild(excerpt);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "attachment-card-actions";
+
+    if (attachment.kind === "image" && attachment.thumbnailUrl) {
+      const viewButton = document.createElement("button");
+      viewButton.type = "button";
+      viewButton.className = "secondary attachment-card-action";
+      viewButton.textContent = "View";
+      viewButton.onclick = () => openAttachmentLightbox(attachment.thumbnailUrl, attachment.label);
+      actions.appendChild(viewButton);
+    }
+
+    if (attachment.kind === "text" && attachment.fullText) {
+      const previewButton = document.createElement("button");
+      previewButton.type = "button";
+      previewButton.className = "secondary attachment-card-action";
+      previewButton.textContent = "Preview";
+      previewButton.onclick = () => openAttachmentPreview({
+        title: attachment.filename || attachment.label,
+        text: attachment.fullText,
+      });
+      actions.appendChild(previewButton);
+    }
+
+    if (attachment.kind === "file" && attachment.previewDataUrl) {
+      const previewButton = document.createElement("button");
+      previewButton.type = "button";
+      previewButton.className = "secondary attachment-card-action";
+      previewButton.textContent = "Preview";
+      previewButton.onclick = () => openAttachmentPreview({
+        title: attachment.filename || attachment.label,
+        pdfUrl: attachment.previewDataUrl,
+      });
+      actions.appendChild(previewButton);
+    }
+
+    if (attachment.fileUrl) {
+      const openButton = document.createElement("button");
+      openButton.type = "button";
+      openButton.className = "secondary attachment-card-action";
+      openButton.textContent = "Open link";
+      openButton.onclick = () => {
+        window.open(attachment.fileUrl, "_blank", "noopener,noreferrer");
+      };
+      actions.appendChild(openButton);
+    }
+
+    if (message.id) {
+      const reanalyzeButton = document.createElement("button");
+      reanalyzeButton.type = "button";
+      reanalyzeButton.className = "secondary attachment-card-action";
+      reanalyzeButton.textContent = "Reanalyze";
+      reanalyzeButton.onclick = () => primeAttachmentReanalyze(message.id);
+      actions.appendChild(reanalyzeButton);
+    }
+
+    if (actions.childElementCount > 0) {
+      body.appendChild(actions);
+    }
+
+    card.appendChild(body);
+    list.appendChild(card);
+  }
+
+  return list;
+};
+
+const buildFileSearchStatusChip = (message) => {
+  if (!message || message.role !== "user" || !message.file_search_status) return null;
+
+  const chipText = buildFileSearchStatusText(message.file_search_status);
+  if (!chipText) return null;
+
+  const statusState = String(message.file_search_status.state || "processing").trim() || "processing";
+  const filenames = Array.isArray(message.file_search_status.filenames)
+    ? message.file_search_status.filenames.filter(Boolean).join(", ")
+    : "";
+  const errorText = String(message.file_search_status.error || "").trim();
+  const titleParts = [];
+  if (filenames) titleParts.push(filenames);
+  if (errorText) titleParts.push(errorText);
+
+  return {
+    className: `file-search-chip ${statusState}`,
+    label: chipText,
+    title: titleParts.length ? titleParts.join("\n") : "",
+  };
+};
+
+const buildMessageMetaSections = (message) => {
+  const sections = [];
+
+  const fileSearchChip = buildFileSearchStatusChip(message);
+  if (fileSearchChip) {
+    sections.push({
+      title: "Search",
+      chips: [fileSearchChip],
+    });
+  }
+
+  const attachmentChips = normalizeAttachmentStatus(message).map((chip) => ({
+    className: `attachment-state-chip ${chip.className}`,
+    label: chip.label,
+    title: chip.title || "",
+  }));
+  if (attachmentChips.length) {
+    sections.push({
+      title: "Attachment",
+      chips: attachmentChips,
+    });
+  }
+
+  const modelChips = normalizeAssistantModelInfo(message).map((chip) => ({
+    className: "assistant-model-chip",
+    label: chip.label,
+    title: chip.title || "",
+  }));
+  if (modelChips.length) {
+    sections.push({
+      title: "Model",
+      chips: modelChips,
+    });
+  }
+
+  const toolChips = normalizeToolsUsed(message.tools_used).map((tool) => ({
+    className: "used-tool-chip",
+    label: tool.label,
+    title: `Used ${tool.label}`,
+  }));
+  if (toolChips.length) {
+    sections.push({
+      title: "Tools",
+      chips: toolChips,
+    });
+  }
+
+  return sections;
+};
+
+const createMetaChipElement = (chip) => {
+  const element = document.createElement("div");
+  element.className = chip.className;
+  element.textContent = chip.label;
+  if (chip.title) {
+    element.title = chip.title;
+  }
+  return element;
+};
+
+const createMessageMetaDetails = (message) => {
+  const sections = buildMessageMetaSections(message);
+  if (!sections.length) return null;
+
+  const flatChips = sections.flatMap((section) => section.chips);
+  const previewChips = flatChips.slice(0, 2);
+
+  const details = document.createElement("details");
+  details.className = "message-meta-details";
+
+  const summary = document.createElement("summary");
+  summary.className = "message-meta-summary";
+
+  const summaryLabel = document.createElement("span");
+  summaryLabel.className = "message-meta-summary-label";
+  summaryLabel.textContent = `Details (${flatChips.length})`;
+  summary.appendChild(summaryLabel);
+
+  const preview = document.createElement("div");
+  preview.className = "message-meta-preview";
+  for (const chip of previewChips) {
+    preview.appendChild(createMetaChipElement(chip));
+  }
+  summary.appendChild(preview);
+  details.appendChild(summary);
+
+  const panel = document.createElement("div");
+  panel.className = "message-meta-panel";
+  for (const section of sections) {
+    const sectionWrap = document.createElement("div");
+    sectionWrap.className = "message-meta-section";
+
+    const title = document.createElement("div");
+    title.className = "message-meta-section-title";
+    title.textContent = section.title;
+    sectionWrap.appendChild(title);
+
+    const row = document.createElement("div");
+    row.className = "message-meta-row";
+    for (const chip of section.chips) {
+      row.appendChild(createMetaChipElement(chip));
+    }
+    sectionWrap.appendChild(row);
+    panel.appendChild(sectionWrap);
+  }
+  details.appendChild(panel);
+
+  return details;
+};
+
 const normalizeActivityLog = (activityLog) => {
   if (!Array.isArray(activityLog)) return [];
 
@@ -1597,6 +2322,25 @@ const createBubble = ({ role, content, extraClass = "", id = "" }) => {
   return bubble;
 };
 
+const getRenderedMessageContent = (message) => {
+  const rawContent = String(message?.content || "");
+  if (!message || message.role !== "user" || !Array.isArray(message.attachments) || !message.attachments.length) {
+    return rawContent;
+  }
+
+  let cleaned = rawContent
+    .split("\n")
+    .filter((line) => !/^\s*\[(image|file(?::[^\]]+)?)\]\s*$/i.test(line.trim()))
+    .join("\n");
+
+  if (message.attachments.some((attachment) => String(attachment?.kind || "").trim() === "text")) {
+    cleaned = cleaned.replace(/(?:^|\n)File \([^)]+\):\n[\s\S]*?(?=(?:\nFile \([^)]+\):\n)|$)/g, "\n");
+  }
+
+  cleaned = cleaned.trim();
+  return cleaned || "(Attachment)";
+};
+
 const createMessageElement = (message) => {
   ensureFileSearchStatusStyles();
 
@@ -1605,12 +2349,17 @@ const createMessageElement = (message) => {
 
   const bubble = createBubble({
     role: message.role,
-    content: message.content,
+    content: getRenderedMessageContent(message),
     id: message.id ? String(message.id) : "",
   });
 
   wrap.appendChild(bubble);
   addImageDownloadActions(wrap, bubble, message);
+
+  const attachmentCards = createAttachmentCards(message);
+  if (attachmentCards) {
+    wrap.appendChild(attachmentCards);
+  }
 
   const actions = document.createElement("div");
   actions.className = "message-actions";
@@ -1636,6 +2385,15 @@ const createMessageElement = (message) => {
     editButton.textContent = "Edit";
     editButton.onclick = () => startEditingMessage(message);
     actions.appendChild(editButton);
+
+    if (message.has_inspectable_attachments) {
+      const reinspectButton = document.createElement("button");
+      reinspectButton.type = "button";
+      reinspectButton.className = "secondary message-action-button";
+      reinspectButton.textContent = "Reanalyze";
+      reinspectButton.onclick = () => primeAttachmentReanalyze(message.id);
+      actions.appendChild(reinspectButton);
+    }
   }
 
   if (message.role === "assistant" && message.id) {
@@ -1662,67 +2420,9 @@ const createMessageElement = (message) => {
     }
   }
 
-  if (message.role === "user" && message.file_search_status) {
-    const chipText = buildFileSearchStatusText(message.file_search_status);
-    if (chipText) {
-      const metaRow = document.createElement("div");
-      metaRow.className = "message-meta-row";
-
-      const chip = document.createElement("div");
-      const statusState = String(message.file_search_status.state || "processing").trim() || "processing";
-      chip.className = `file-search-chip ${statusState}`;
-      chip.textContent = chipText;
-
-      const filenames = Array.isArray(message.file_search_status.filenames)
-        ? message.file_search_status.filenames.filter(Boolean).join(", ")
-        : "";
-      const errorText = String(message.file_search_status.error || "").trim();
-      const titleParts = [];
-      if (filenames) titleParts.push(filenames);
-      if (errorText) titleParts.push(errorText);
-      if (titleParts.length) {
-        chip.title = titleParts.join("\n");
-      }
-
-      metaRow.appendChild(chip);
-      wrap.appendChild(metaRow);
-    }
-  }
-
-  if (message.role === "assistant") {
-    const modelChips = normalizeAssistantModelInfo(message);
-    if (modelChips.length) {
-      const metaRow = document.createElement("div");
-      metaRow.className = "message-meta-row assistant-model-row";
-
-      for (const modelChip of modelChips) {
-        const chip = document.createElement("div");
-        chip.className = "assistant-model-chip";
-        chip.textContent = modelChip.label;
-        if (modelChip.title) {
-          chip.title = modelChip.title;
-        }
-        metaRow.appendChild(chip);
-      }
-
-      wrap.appendChild(metaRow);
-    }
-
-    const toolsUsed = normalizeToolsUsed(message.tools_used);
-    if (toolsUsed.length) {
-      const metaRow = document.createElement("div");
-      metaRow.className = "message-meta-row used-tools-row";
-
-      for (const tool of toolsUsed) {
-        const chip = document.createElement("div");
-        chip.className = "used-tool-chip";
-        chip.textContent = tool.label;
-        chip.title = `Used ${tool.label}`;
-        metaRow.appendChild(chip);
-      }
-
-      wrap.appendChild(metaRow);
-    }
+  const metaDetails = createMessageMetaDetails(message);
+  if (metaDetails) {
+    wrap.appendChild(metaDetails);
   }
 
   return wrap;
@@ -1840,6 +2540,7 @@ const renderMemories = () => {
     remove.textContent = "Delete";
     remove.type = "button";
     remove.onclick = async () => {
+      if (!confirm(`Delete memory #${memory.id}?`)) return;
       try {
         await deleteMemory(memory.id);
       } catch (error) {
@@ -2210,6 +2911,7 @@ const selectConversation = async (conversationId) => {
 
   clearFileSearchStatusPoll();
   state.activeConversation = conversationId;
+  clearPendingReinspectTargets();
   setEditingState(null);
   clearDraftAttachments();
   clearChatSearch();
@@ -2223,6 +2925,7 @@ const createConversation = async () => {
   if (state.isSending) return;
 
   clearFileSearchStatusPoll();
+  clearPendingReinspectTargets();
   const data = await api("/api/conversations", { method: "POST" });
   setEditingState(null);
   updateConversationActionState();
@@ -2376,6 +3079,7 @@ const sendMessage = async () => {
       conversationTitle.textContent = newTitle;
       messageInput.value = "";
       fileInput.value = "";
+      updateComposerContext();
       await loadConversations({ refreshMessages: false });
       setStatus("Title updated.", "", 2000);
       return;
@@ -2414,6 +3118,7 @@ const sendMessage = async () => {
       attachments,
       enable_web_search: !!enableWebSearchInput?.checked,
       enable_code_interpreter: !!enableCodeInterpreterInput?.checked,
+      reinspect_message_ids: [...(state.pendingReinspectMessageIds || [])],
       ...getSelectedChatOptions(),
     };
 
@@ -2423,6 +3128,8 @@ const sendMessage = async () => {
 
     messageInput.value = "";
     fileInput.value = "";
+    clearPendingReinspectTargets();
+    updateComposerContext();
 
     let result;
     if (isEditing) {
@@ -2684,6 +3391,7 @@ saveMemoryBtn.onclick = () => {
 };
 
 clearMemoriesBtn.onclick = () => {
+  if (!confirm("Clear all saved memories?")) return;
   void clearMemories();
 };
 
@@ -2744,6 +3452,12 @@ messageInput.addEventListener("keydown", (event) => {
 messageInput.addEventListener("input", () => {
   updateImageCommandHint();
 });
+
+if (fileInput) {
+  fileInput.addEventListener("change", () => {
+    updateComposerContext();
+  });
+}
 
 conversationSearchInput.addEventListener("focus", () => {
   if (conversationSearchTimer) {
@@ -2839,6 +3553,7 @@ initializeApp();
 updateConversationActionState();
 updateCancelResponseButton();
 updateImageCommandHint();
+updateComposerContext();
 window.addEventListener("load", scheduleMessageBottomSnap);
 
 /* --- Mobile drawer polish: memories drawer + backdrop + mutual exclusion --- */
@@ -2972,13 +3687,13 @@ window.addEventListener("load", scheduleMessageBottomSnap);
     const shouldOpen = !!open && isPhoneLayout();
     composerTools.classList.toggle("open", shouldOpen);
     toggleComposerToolsBtn.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
-    toggleComposerToolsBtn.textContent = shouldOpen ? "Hide tools" : "Tools";
+    toggleComposerToolsBtn.textContent = shouldOpen ? "Hide options" : "Options";
   };
 
   const resetComposerTools = () => {
     composerTools.classList.remove("open");
     toggleComposerToolsBtn.setAttribute("aria-expanded", "false");
-    toggleComposerToolsBtn.textContent = "Tools";
+    toggleComposerToolsBtn.textContent = "Options";
   };
 
   toggleComposerToolsBtn.addEventListener("click", () => {
@@ -2990,7 +3705,7 @@ window.addEventListener("load", scheduleMessageBottomSnap);
     if (!isPhoneLayout()) {
       composerTools.classList.remove("open");
       toggleComposerToolsBtn.setAttribute("aria-expanded", "false");
-      toggleComposerToolsBtn.textContent = "Tools";
+      toggleComposerToolsBtn.textContent = "Options";
     } else {
       resetComposerTools();
     }
