@@ -78,7 +78,7 @@
                 aria-expanded="false"
                 aria-controls="composerTools"
               >
-                Tools
+                Options
               </button>
             </div>
           </div>
@@ -107,74 +107,96 @@
         <div class="messages" id="messageList" aria-live="polite"></div>
         
         <div class="composer">
-          <textarea
-            id="messageInput"
-            placeholder="Type a message or paste a GitHub/PDF link..."
-            aria-label="Message input"
-          ></textarea>
-        
-          <div
-            id="imageCommandHint"
-            class="composer-hint"
-            hidden
-            aria-live="polite"
-            aria-hidden="true"
-          >
-            <strong>/image options:</strong>
-            <code>model=gpt-image-1.5|gpt-image-1|gpt-image-1-mini|dall-e-3|dall-e-2</code>,
-            <code>size=1024x1024|1024x1536|1536x1024|auto</code>,
-            <code>quality=low|medium|high|auto</code>,
-            <code>background=transparent|opaque|auto</code>,
-            <code>output_format=png|webp|jpeg</code>.
-            Example:
-            <code>/image size=1536x1024 quality=high background=transparent A glass spaceship in a desert</code>
-          </div>
-        
-          <div id="composerTools" class="composer-tools">
-            <input
-              type="file"
-              id="fileInput"
-              multiple
-              accept="image/*,.pdf,.txt,.md,.markdown,.csv,.tsv,.json,.jsonl,.py,.js,.ts,.tsx,.jsx,.html,.css,.xml,.yaml,.yml,.log,.toml,.ini,.cfg,.sql"
-              aria-label="Attach files"
-            />
-          
-            <div class="composer-toggles">
-              <label class="search-toggle">
-                <input type="checkbox" id="enableWebSearch" checked />
-                Allow web search when needed
-              </label>
-              <label class="search-toggle">
-                <input type="checkbox" id="enableCodeInterpreter" checked />
-                Allow code interpreter
-              </label>
+          <div class="composer-main">
+            <textarea
+              id="messageInput"
+              placeholder="Type a message or paste a GitHub/PDF link..."
+              aria-label="Message input"
+            ></textarea>
+
+            <div
+              id="composerContext"
+              class="composer-context"
+              hidden
+              aria-live="polite"
+            >
+              <div id="composerContextChips" class="composer-context-chips"></div>
             </div>
 
-            <div class="composer-model-controls">
-              <label class="composer-setting">
-                <span>Model</span>
-                <select id="modelSelect" aria-label="Model">
-                  <option value="">Loading models...</option>
-                </select>
+            <div
+              id="imageCommandHint"
+              class="composer-hint"
+              hidden
+              aria-live="polite"
+              aria-hidden="true"
+            >
+              <strong>/image options:</strong>
+              <code>model=gpt-image-1.5|gpt-image-1|gpt-image-1-mini|dall-e-3|dall-e-2</code>,
+              <code>size=1024x1024|1024x1536|1536x1024|auto</code>,
+              <code>quality=low|medium|high|auto</code>,
+              <code>background=transparent|opaque|auto</code>,
+              <code>output_format=png|webp|jpeg</code>.
+              Example:
+              <code>/image size=1536x1024 quality=high background=transparent A glass spaceship in a desert</code>
+            </div>
+
+            <div class="composer-footer">
+              <label class="composer-file-field">
+                <span class="composer-section-label">Attachments</span>
+                <input
+                  type="file"
+                  id="fileInput"
+                  multiple
+                  accept="image/*,.pdf,.txt,.md,.markdown,.csv,.tsv,.json,.jsonl,.py,.js,.ts,.tsx,.jsx,.html,.css,.xml,.yaml,.yml,.log,.toml,.ini,.cfg,.sql"
+                  aria-label="Attach files"
+                />
               </label>
-              <label class="search-toggle reasoning-toggle">
-                <input type="checkbox" id="enableReasoning" />
-                Use reasoning mode
-              </label>
-              <label class="composer-setting">
-                <span>Reasoning effort</span>
-                <select id="reasoningEffort" aria-label="Reasoning effort" disabled>
-                  <option value="low">Low</option>
-                  <option value="medium" selected>Medium</option>
-                  <option value="high">High</option>
-                </select>
-              </label>
+
+              <div class="composer-actions">
+                <button class="secondary" id="cancelResponseBtn" type="button" hidden disabled>Cancel</button>
+                <button class="primary" id="sendMessage" type="button">Send</button>
+              </div>
             </div>
           </div>
-        
-          <div class="composer-actions">
-            <button class="secondary" id="cancelResponseBtn" type="button" hidden disabled>Cancel</button>
-            <button class="primary" id="sendMessage" type="button">Send</button>
+
+          <div id="composerTools" class="composer-tools">
+            <section class="composer-tool-card">
+              <div class="composer-card-title">Tool access</div>
+              <div class="composer-toggles">
+                <label class="search-toggle">
+                  <input type="checkbox" id="enableWebSearch" checked />
+                  Allow web search when needed
+                </label>
+                <label class="search-toggle">
+                  <input type="checkbox" id="enableCodeInterpreter" checked />
+                  Allow code interpreter
+                </label>
+              </div>
+            </section>
+
+            <section class="composer-tool-card">
+              <div class="composer-card-title">Model and reasoning</div>
+              <div class="composer-model-controls">
+                <label class="composer-setting">
+                  <span>Model</span>
+                  <select id="modelSelect" aria-label="Model">
+                    <option value="">Loading models...</option>
+                  </select>
+                </label>
+                <label class="search-toggle reasoning-toggle">
+                  <input type="checkbox" id="enableReasoning" />
+                  Use reasoning mode
+                </label>
+                <label class="composer-setting">
+                  <span>Reasoning effort</span>
+                  <select id="reasoningEffort" aria-label="Reasoning effort" disabled>
+                    <option value="low">Low</option>
+                    <option value="medium" selected>Medium</option>
+                    <option value="high">High</option>
+                  </select>
+                </label>
+              </div>
+            </section>
           </div>
         </div>
       </section>
