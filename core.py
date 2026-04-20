@@ -42,6 +42,8 @@ GITHUB_TOOL_MAX_FILE_CHARS = int(os.environ.get("CHATBOT_GITHUB_MAX_FILE_CHARS",
 GITHUB_TOOL_MAX_LIST_ENTRIES = int(os.environ.get("CHATBOT_GITHUB_MAX_LIST_ENTRIES", "200"))
 GITHUB_TOOL_MAX_SEARCH_RESULTS = int(os.environ.get("CHATBOT_GITHUB_MAX_SEARCH_RESULTS", "12"))
 MAX_TOOL_ROUNDS = int(os.environ.get("CHATBOT_MAX_TOOL_ROUNDS", "8"))
+MAX_BUILTIN_TOOL_CALLS = max(1, int(os.environ.get("CHATBOT_MAX_BUILTIN_TOOL_CALLS", "6")))
+MAX_RESPONSE_CONTINUATIONS = max(1, int(os.environ.get("CHATBOT_MAX_RESPONSE_CONTINUATIONS", "3")))
 ATTACHMENTS_DIR = os.environ.get("CHATBOT_ATTACHMENTS_DIR", "").strip()
 FILE_SEARCH_ENABLED = os.environ.get("CHATBOT_ENABLE_FILE_SEARCH", "1").lower() not in {"0", "false", "no"}
 FILE_SEARCH_MAX_RESULTS = int(os.environ.get("CHATBOT_FILE_SEARCH_MAX_RESULTS", "4"))
@@ -3364,6 +3366,13 @@ def _call_openai_response(payload: dict, *, timeout: int = 90) -> dict:
         raise RuntimeError(f"OpenAI API error ({http_error.code}): {detail}") from http_error
 
 
+def _apply_built_in_tool_limits(payload: dict, *, has_tools: bool) -> None:
+    if not has_tools:
+        return
+    payload["parallel_tool_calls"] = False
+    payload["max_tool_calls"] = MAX_BUILTIN_TOOL_CALLS
+
+
 def _openai_api_get_json(url: str, *, timeout: int = 90) -> dict:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -4166,8 +4175,9 @@ def _finalize_response_result(
     *,
     model: str,
     reasoning_effort: Optional[str] = None,
+    text_override: Optional[str] = None,
 ) -> ResponseResult:
-    text = extract_response_text(response_data)
+    text = str(text_override or "").strip() or extract_response_text(response_data)
     if text:
         citations = extract_container_file_citations(response_data)
         if citations:
@@ -4190,6 +4200,115 @@ def _finalize_response_result(
             reasoning_effort=reasoning_effort,
         )
     raise RuntimeError(f"Unexpected API response format: {response_data}")
+
+
+def _force_final_text_response(
+    previous_response_id: str,
+    *,
+    model: str,
+    reasoning_effort: Optional[str] = None,
+) -> dict:
+    if not previous_response_id:
+        raise RuntimeError("Missing previous_response_id for forced final response.")
+
+    payload = {
+        "model": model,
+        "previous_response_id": previous_response_id,
+        "input": [
+            {
+                "role": "system",
+                "content": (
+                    "You have already gathered the needed tool results. "
+                    "Now answer the user's request directly in one final response. "
+                    "Provide a complete, substantive answer rather than a brief acknowledgement. "
+                    "If the user asked for configuration, code, steps, or a concrete recommendation, include it fully. "
+                    "Do not perform more web searches or other tool calls in this turn."
+                ),
+            }
+        ],
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
+    }
+    normalized_reasoning_effort = (
+        normalize_reasoning_effort(reasoning_effort)
+        if reasoning_effort
+        else None
+    )
+    if normalized_reasoning_effort:
+        payload["reasoning"] = {"effort": normalized_reasoning_effort}
+    _apply_built_in_tool_limits(payload, has_tools=False)
+    return _call_openai_response(payload, timeout=90)
+
+
+def _response_incomplete_due_to_max_tokens(response_data: dict) -> bool:
+    if not isinstance(response_data, dict):
+        return False
+    status = str(response_data.get("status") or "").strip().lower()
+    if status != "incomplete":
+        return False
+    incomplete_details = response_data.get("incomplete_details")
+    if not isinstance(incomplete_details, dict):
+        return False
+    return str(incomplete_details.get("reason") or "").strip().lower() == "max_output_tokens"
+
+
+def _continue_text_response(
+    previous_response_id: str,
+    *,
+    model: str,
+    reasoning_effort: Optional[str] = None,
+) -> dict:
+    if not previous_response_id:
+        raise RuntimeError("Missing previous_response_id for continuation.")
+
+    payload = {
+        "model": model,
+        "previous_response_id": previous_response_id,
+        "input": [
+            {
+                "role": "system",
+                "content": (
+                    "Continue the previous assistant response from exactly where it stopped. "
+                    "Do not restart, repeat, or summarize from the beginning. "
+                    "Do not use any tools in this continuation."
+                ),
+            }
+        ],
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
+    }
+    normalized_reasoning_effort = (
+        normalize_reasoning_effort(reasoning_effort)
+        if reasoning_effort
+        else None
+    )
+    if normalized_reasoning_effort:
+        payload["reasoning"] = {"effort": normalized_reasoning_effort}
+    _apply_built_in_tool_limits(payload, has_tools=False)
+    return _call_openai_response(payload, timeout=90)
+
+
+def _complete_response_text_if_needed(
+    response_data: dict,
+    *,
+    model: str,
+    reasoning_effort: Optional[str] = None,
+) -> tuple[dict, Optional[str]]:
+    combined_text = extract_response_text(response_data)
+    current_response = response_data
+
+    for _ in range(MAX_RESPONSE_CONTINUATIONS):
+        if not _response_incomplete_due_to_max_tokens(current_response):
+            break
+        next_response = _continue_text_response(
+            str(current_response.get("id") or "").strip(),
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+        continuation_text = extract_response_text(next_response)
+        if continuation_text:
+            combined_text = f"{combined_text}{continuation_text}" if combined_text else continuation_text
+        current_response = next_response
+
+    return current_response, combined_text or None
 
 
 def _run_openai_response_loop(
@@ -4240,6 +4359,7 @@ def _run_openai_response_loop(
         payload["tools"] = tools
     if tool_choice:
         payload["tool_choice"] = tool_choice
+    _apply_built_in_tool_limits(payload, has_tools=bool(tools))
 
     response_data = _call_openai_response(payload, timeout=90)
     activity_log: List[dict] = []
@@ -4247,12 +4367,27 @@ def _run_openai_response_loop(
     for _ in range(MAX_TOOL_ROUNDS):
         function_calls = _extract_function_calls(response_data)
         if not function_calls:
+            extracted_tools = extract_used_tools(response_data)
+            tools_used = merge_tool_labels(tools_used, extracted_tools)
+            extracted_text = extract_response_text(response_data)
+            if not extracted_text and extracted_tools:
+                response_data = _force_final_text_response(
+                    str(response_data.get("id") or "").strip(),
+                    model=resolved_model,
+                    reasoning_effort=normalized_reasoning_effort,
+                )
+            response_data, completed_text = _complete_response_text_if_needed(
+                response_data,
+                model=resolved_model,
+                reasoning_effort=normalized_reasoning_effort,
+            )
             return _finalize_response_result(
                 response_data,
-                tools_used,
+                merge_tool_labels(tools_used, extracted_tools),
                 activity_log,
                 model=resolved_model,
                 reasoning_effort=normalized_reasoning_effort,
+                text_override=completed_text,
             )
 
         if not github_tools_active:
@@ -4315,14 +4450,31 @@ def _run_openai_response_loop(
             next_payload["tools"] = tools
         if tool_choice:
             next_payload["tool_choice"] = tool_choice
+        _apply_built_in_tool_limits(next_payload, has_tools=bool(tools))
         response_data = _call_openai_response(next_payload, timeout=90)
+
+    extracted_tools = extract_used_tools(response_data)
+    tools_used = merge_tool_labels(tools_used, extracted_tools)
+    extracted_text = extract_response_text(response_data)
+    if not extracted_text and extracted_tools:
+        response_data = _force_final_text_response(
+            str(response_data.get("id") or "").strip(),
+            model=resolved_model,
+            reasoning_effort=normalized_reasoning_effort,
+        )
+    response_data, completed_text = _complete_response_text_if_needed(
+        response_data,
+        model=resolved_model,
+        reasoning_effort=normalized_reasoning_effort,
+    )
 
     return _finalize_response_result(
         response_data,
-        tools_used,
+        merge_tool_labels(tools_used, extracted_tools),
         activity_log,
         model=resolved_model,
         reasoning_effort=normalized_reasoning_effort,
+        text_override=completed_text,
     )
 
 
@@ -4388,6 +4540,7 @@ def stream_openai(
             payload["tools"] = tools
         if tool_choice:
             payload["tool_choice"] = tool_choice
+        _apply_built_in_tool_limits(payload, has_tools=bool(tools))
 
         response_data = _call_openai_response(payload, timeout=90)
 
@@ -4475,6 +4628,7 @@ def stream_openai(
                 next_payload["tools"] = tools
             if tool_choice:
                 next_payload["tool_choice"] = tool_choice
+            _apply_built_in_tool_limits(next_payload, has_tools=bool(tools))
             response_data = _call_openai_response(next_payload, timeout=90)
 
         result = _finalize_response_result(
@@ -4515,6 +4669,7 @@ def stream_openai(
         payload["tools"] = tools
     if tool_choice:
         payload["tool_choice"] = tool_choice
+    _apply_built_in_tool_limits(payload, has_tools=bool(tools))
 
     data = json.dumps(payload).encode("utf-8")
     req = request.Request(
@@ -4586,6 +4741,60 @@ def stream_openai(
                 )
             full_text = f"{full_text}\n\nDownloads:\n" + "\n".join(lines) if full_text else "Downloads:\n" + "\n".join(lines)
         tools_used = extract_used_tools(completed_response)
+        completed_response, completed_text = _complete_response_text_if_needed(
+            completed_response,
+            model=resolved_model,
+            reasoning_effort=normalized_reasoning_effort,
+        )
+        if completed_text:
+            full_text = completed_text
+
+    if not full_text and (tools_used or activity_log):
+        if isinstance(completed_response, dict) and str(completed_response.get("id") or "").strip():
+            forced_response = _force_final_text_response(
+                str(completed_response.get("id") or "").strip(),
+                model=resolved_model,
+                reasoning_effort=normalized_reasoning_effort,
+            )
+            forced_response, forced_text = _complete_response_text_if_needed(
+                forced_response,
+                model=resolved_model,
+                reasoning_effort=normalized_reasoning_effort,
+            )
+            forced_result = _finalize_response_result(
+                forced_response,
+                tools_used,
+                activity_log,
+                model=resolved_model,
+                reasoning_effort=normalized_reasoning_effort,
+                text_override=forced_text,
+            )
+            yield {
+                "type": "done",
+                "text": forced_result.text,
+                "tools_used": forced_result.tools_used,
+                "activity_log": forced_result.activity_log,
+                "model": forced_result.model,
+                "reasoning_effort": forced_result.reasoning_effort,
+            }
+            return
+
+        fallback_result = _run_openai_response_loop(
+            message_list,
+            web_search_mode=web_search_mode,
+            enable_code_interpreter=enable_code_interpreter,
+            model=resolved_model,
+            reasoning_effort=normalized_reasoning_effort,
+        )
+        yield {
+            "type": "done",
+            "text": fallback_result.text,
+            "tools_used": fallback_result.tools_used,
+            "activity_log": fallback_result.activity_log,
+            "model": fallback_result.model,
+            "reasoning_effort": fallback_result.reasoning_effort,
+        }
+        return
 
     final_activity_log = normalize_activity_log(activity_log)
     if not final_activity_log:
