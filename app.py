@@ -12,6 +12,7 @@ from core import (
     add_message,
     add_message_returning_id,
     auto_extract_memory_suggestions_from_user_text,
+    build_replay_history_from_rows,
     build_system_prompt,
     call_openai,
     clear_memories,
@@ -21,8 +22,10 @@ from core import (
     create_user_message,
     delete_conversation,
     delete_memory,
+    get_recent_message_rows_with_ids,
     get_conversation_title,
     get_recent_messages,
+    infer_inspected_attachment_message_ids,
     init_db,
     list_conversations,
     list_memories,
@@ -154,8 +157,18 @@ def send_user_message(
     web_search_mode: str = "off",
     enable_code_interpreter: bool = True,
 ) -> None:
-    history = get_recent_messages(conn, conversation_id)
-    system_prompt = build_system_prompt(conn, query, conversation_id=conversation_id)
+    history_rows = get_recent_message_rows_with_ids(conn, conversation_id)
+    history = build_replay_history_from_rows(
+        history_rows,
+        query=query,
+        current_user_message=user_message,
+    )
+    system_prompt = build_system_prompt(
+        conn,
+        query,
+        conversation_id=conversation_id,
+        current_user_message=user_message,
+    )
     messages = [Message("system", system_prompt), *history, user_message]
 
     response_text = call_openai(
@@ -170,6 +183,13 @@ def send_user_message(
         conversation_id=conversation_id,
         source_message_id=user_message_id,
     )
+    inspected_attachment_message_ids = infer_inspected_attachment_message_ids(
+        history_rows,
+        current_user_message_id=user_message_id,
+        current_user_message=user_message,
+        tools_used=response_text.tools_used,
+        response_text=response_text.text,
+    )
     add_message(
         conn,
         conversation_id,
@@ -182,6 +202,7 @@ def send_user_message(
                 "model": response_text.model,
                 "reasoning_enabled": bool(response_text.reasoning_effort),
                 "reasoning_effort": response_text.reasoning_effort,
+                "inspected_attachment_message_ids": inspected_attachment_message_ids,
             },
         ),
     )
