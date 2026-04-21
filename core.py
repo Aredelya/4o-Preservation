@@ -20,7 +20,7 @@ API_URL = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/responses"
 IMAGES_API_URL = os.environ.get("OPENAI_IMAGES_API_URL", "https://api.openai.com/v1/images/generations")
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-2024-11-20")
 IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
-DEFAULT_REASONING_MODEL = os.environ.get("OPENAI_REASONING_MODEL", "gpt-5.4").strip() or "gpt-5.4"
+DEFAULT_REASONING_MODEL = os.environ.get("OPENAI_REASONING_MODEL", "gpt-5.1").strip() or "gpt-5.1"
 DEFAULT_REASONING_EFFORT = os.environ.get("OPENAI_REASONING_EFFORT", "medium").strip().lower() or "medium"
 MAX_HISTORY = int(os.environ.get("CHATBOT_MAX_HISTORY", "50"))
 MAX_OUTPUT_TOKENS = int(os.environ.get("CHATBOT_MAX_OUTPUT_TOKENS", "800"))
@@ -71,7 +71,7 @@ def _parse_model_list(raw_value: str) -> List[str]:
 AVAILABLE_CHAT_MODELS = _parse_model_list(
     os.environ.get(
         "CHATBOT_AVAILABLE_MODELS",
-        ",".join([MODEL, DEFAULT_REASONING_MODEL, "gpt-5.4-mini"]),
+        ",".join([MODEL, DEFAULT_REASONING_MODEL, "gpt-5.1", "gpt-5.4-mini"]),
     )
 )
 if MODEL not in AVAILABLE_CHAT_MODELS:
@@ -3556,7 +3556,8 @@ def _text_attachment_from_block(block: dict) -> Optional[tuple[str, bytes, str, 
 
     payload = body.encode("utf-8")
     mime_type = mimetypes.guess_type(filename)[0] or "text/plain"
-    source_key = f"text:{hashlib.sha256((filename + '\0' + body).encode('utf-8')).hexdigest()}"
+    hash_input = (filename + "\0" + body).encode("utf-8")
+    source_key = f"text:{hashlib.sha256(hash_input).hexdigest()}"
     return source_key, payload, mime_type, filename
 
 
