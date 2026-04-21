@@ -23,7 +23,7 @@ IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
 DEFAULT_REASONING_MODEL = os.environ.get("OPENAI_REASONING_MODEL", "gpt-5.1").strip() or "gpt-5.1"
 DEFAULT_REASONING_EFFORT = os.environ.get("OPENAI_REASONING_EFFORT", "medium").strip().lower() or "medium"
 MAX_HISTORY = int(os.environ.get("CHATBOT_MAX_HISTORY", "50"))
-MAX_OUTPUT_TOKENS = int(os.environ.get("CHATBOT_MAX_OUTPUT_TOKENS", "800"))
+MAX_OUTPUT_TOKENS = int(os.environ.get("CHATBOT_MAX_OUTPUT_TOKENS", "0"))
 EMBEDDING_MODEL = os.environ.get("CHATBOT_EMBEDDING_MODEL", "text-embedding-3-small")
 EMBEDDINGS_ENABLED = os.environ.get("CHATBOT_USE_EMBEDDINGS", "1").lower() not in {"0", "false", "no"}
 EMBEDDINGS_TOP_K = int(os.environ.get("CHATBOT_EMBEDDINGS_TOP_K", "6"))
@@ -43,7 +43,7 @@ GITHUB_TOOL_MAX_LIST_ENTRIES = int(os.environ.get("CHATBOT_GITHUB_MAX_LIST_ENTRI
 GITHUB_TOOL_MAX_SEARCH_RESULTS = int(os.environ.get("CHATBOT_GITHUB_MAX_SEARCH_RESULTS", "12"))
 MAX_TOOL_ROUNDS = int(os.environ.get("CHATBOT_MAX_TOOL_ROUNDS", "8"))
 MAX_BUILTIN_TOOL_CALLS = max(1, int(os.environ.get("CHATBOT_MAX_BUILTIN_TOOL_CALLS", "6")))
-MAX_RESPONSE_CONTINUATIONS = max(1, int(os.environ.get("CHATBOT_MAX_RESPONSE_CONTINUATIONS", "3")))
+MAX_RESPONSE_CONTINUATIONS = int(os.environ.get("CHATBOT_MAX_RESPONSE_CONTINUATIONS", "0"))
 ATTACHMENTS_DIR = os.environ.get("CHATBOT_ATTACHMENTS_DIR", "").strip()
 FILE_SEARCH_ENABLED = os.environ.get("CHATBOT_ENABLE_FILE_SEARCH", "1").lower() not in {"0", "false", "no"}
 FILE_SEARCH_MAX_RESULTS = int(os.environ.get("CHATBOT_FILE_SEARCH_MAX_RESULTS", "4"))
@@ -137,6 +137,11 @@ def normalize_reasoning_effort(effort: Optional[str]) -> str:
     if normalized in REASONING_EFFORT_OPTIONS:
         return normalized
     return DEFAULT_REASONING_EFFORT
+
+
+def apply_max_output_tokens(payload: dict) -> None:
+    if MAX_OUTPUT_TOKENS > 0:
+        payload["max_output_tokens"] = MAX_OUTPUT_TOKENS
 
 
 def resolve_chat_settings(
@@ -4227,8 +4232,8 @@ def _force_final_text_response(
                 ),
             }
         ],
-        "max_output_tokens": MAX_OUTPUT_TOKENS,
     }
+    apply_max_output_tokens(payload)
     normalized_reasoning_effort = (
         normalize_reasoning_effort(reasoning_effort)
         if reasoning_effort
@@ -4274,8 +4279,8 @@ def _continue_text_response(
                 ),
             }
         ],
-        "max_output_tokens": MAX_OUTPUT_TOKENS,
     }
+    apply_max_output_tokens(payload)
     normalized_reasoning_effort = (
         normalize_reasoning_effort(reasoning_effort)
         if reasoning_effort
@@ -4296,8 +4301,13 @@ def _complete_response_text_if_needed(
     combined_text = extract_response_text(response_data)
     current_response = response_data
 
-    for _ in range(MAX_RESPONSE_CONTINUATIONS):
+    continuation_rounds = 0
+    while True:
         if not _response_incomplete_due_to_max_tokens(current_response):
+            break
+        if MAX_RESPONSE_CONTINUATIONS > 0 and continuation_rounds >= MAX_RESPONSE_CONTINUATIONS:
+            break
+        if continuation_rounds >= 100:
             break
         next_response = _continue_text_response(
             str(current_response.get("id") or "").strip(),
@@ -4308,6 +4318,7 @@ def _complete_response_text_if_needed(
         if continuation_text:
             combined_text = f"{combined_text}{continuation_text}" if combined_text else continuation_text
         current_response = next_response
+        continuation_rounds += 1
 
     return current_response, combined_text or None
 
@@ -4352,8 +4363,8 @@ def _run_openai_response_loop(
     payload = {
         "model": resolved_model,
         "input": input_items,
-        "max_output_tokens": MAX_OUTPUT_TOKENS,
     }
+    apply_max_output_tokens(payload)
     if normalized_reasoning_effort:
         payload["reasoning"] = {"effort": normalized_reasoning_effort}
     if tools:
@@ -4443,8 +4454,8 @@ def _run_openai_response_loop(
             "model": resolved_model,
             "previous_response_id": response_data.get("id"),
             "input": function_outputs,
-            "max_output_tokens": MAX_OUTPUT_TOKENS,
         }
+        apply_max_output_tokens(next_payload)
         if normalized_reasoning_effort:
             next_payload["reasoning"] = {"effort": normalized_reasoning_effort}
         if tools:
@@ -4533,8 +4544,8 @@ def stream_openai(
         payload = {
             "model": resolved_model,
             "input": input_items,
-            "max_output_tokens": MAX_OUTPUT_TOKENS,
         }
+        apply_max_output_tokens(payload)
         if normalized_reasoning_effort:
             payload["reasoning"] = {"effort": normalized_reasoning_effort}
         if tools:
@@ -4621,8 +4632,8 @@ def stream_openai(
                 "model": resolved_model,
                 "previous_response_id": response_data.get("id"),
                 "input": function_outputs,
-                "max_output_tokens": MAX_OUTPUT_TOKENS,
             }
+            apply_max_output_tokens(next_payload)
             if normalized_reasoning_effort:
                 next_payload["reasoning"] = {"effort": normalized_reasoning_effort}
             if tools:
@@ -4656,9 +4667,9 @@ def stream_openai(
     payload = {
         "model": resolved_model,
         "input": [{"role": message.role, "content": message.content} for message in message_list],
-        "max_output_tokens": MAX_OUTPUT_TOKENS,
         "stream": True,
     }
+    apply_max_output_tokens(payload)
     if normalized_reasoning_effort:
         payload["reasoning"] = {"effort": normalized_reasoning_effort}
     tools, tool_choice = _response_tools(
