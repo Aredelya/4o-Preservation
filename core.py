@@ -223,9 +223,13 @@ def resolve_chat_settings(
     requested_model = normalize_chat_model(model)
     resolved_model = requested_model
     resolved_reasoning_effort: Optional[str] = None
+    requested_reasoning_effort: Optional[str] = None
     reasoning_enabled = bool(enable_reasoning)
 
     if reasoning_enabled:
+        requested_reasoning_effort = str(reasoning_effort or DEFAULT_REASONING_EFFORT).strip().lower()
+        if requested_reasoning_effort not in REASONING_EFFORT_OPTIONS:
+            requested_reasoning_effort = DEFAULT_REASONING_EFFORT
         resolved_reasoning_effort = resolve_reasoning_effort(
             reasoning_effort,
             prompt_text=prompt_text,
@@ -239,12 +243,14 @@ def resolve_chat_settings(
         "model": resolved_model,
         "reasoning_enabled": reasoning_enabled,
         "reasoning_effort": resolved_reasoning_effort,
+        "requested_reasoning_effort": requested_reasoning_effort,
     }
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
     title TEXT,
+    pinned INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -444,6 +450,9 @@ def init_db(conn: sqlite3.Connection) -> None:
             WHERE updated_at IS NULL
             """
         )
+        conn.commit()
+    if "pinned" not in columns:
+        conn.execute("ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
         conn.commit()
 
     message_columns = {
@@ -822,16 +831,20 @@ def create_conversation(conn: sqlite3.Connection, title: Optional[str] = None) -
     return conversation_id
 
 
-def list_conversations(conn: sqlite3.Connection) -> List[Tuple[str, Optional[str], str]]:
+def list_conversations(conn: sqlite3.Connection) -> List[Tuple[str, Optional[str], str, bool]]:
     rows = conn.execute(
-        "SELECT id, title, created_at FROM conversations ORDER BY updated_at DESC, created_at DESC"
+        """
+        SELECT id, title, created_at, pinned
+        FROM conversations
+        ORDER BY pinned DESC, updated_at DESC, created_at DESC
+        """
     ).fetchall()
-    return [(row["id"], row["title"], row["created_at"]) for row in rows]
+    return [(row["id"], row["title"], row["created_at"], bool(row["pinned"])) for row in rows]
 
 
 def search_conversations(
     conn: sqlite3.Connection, query: str, limit: int = 25
-) -> List[Tuple[str, Optional[str], str, Optional[str]]]:
+) -> List[Tuple[str, Optional[str], str, Optional[str], bool]]:
     term = query.strip().lower()
     if not term:
         return []
@@ -843,22 +856,23 @@ def search_conversations(
             c.id,
             c.title,
             c.created_at,
+            c.pinned,
             MAX(CASE WHEN LOWER(m.content) LIKE ? THEN m.content ELSE NULL END) AS snippet,
             MAX(CASE WHEN LOWER(c.title) LIKE ? THEN 1 ELSE 0 END) AS title_match,
             SUM(CASE WHEN LOWER(m.content) LIKE ? THEN 1 ELSE 0 END) AS message_matches,
             COALESCE(MAX(m.created_at), c.updated_at, c.created_at) AS sort_time
         FROM conversations c
         LEFT JOIN messages m ON m.conversation_id = c.id
-        GROUP BY c.id, c.title, c.created_at, c.updated_at
+        GROUP BY c.id, c.title, c.created_at, c.updated_at, c.pinned
         HAVING title_match > 0 OR message_matches > 0
-        ORDER BY title_match DESC, message_matches DESC, sort_time DESC
+        ORDER BY c.pinned DESC, title_match DESC, message_matches DESC, sort_time DESC
         LIMIT ?
         """,
         (like_term, like_term, like_term, limit),
     ).fetchall()
 
     return [
-        (row["id"], row["title"], row["created_at"], row["snippet"])
+        (row["id"], row["title"], row["created_at"], row["snippet"], bool(row["pinned"]))
         for row in rows
     ]
 
@@ -876,6 +890,17 @@ def update_conversation_title(
     cur = conn.execute(
         "UPDATE conversations SET title = ? WHERE id = ?",
         (title, conversation_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def update_conversation_pinned(
+    conn: sqlite3.Connection, conversation_id: str, pinned: bool
+) -> bool:
+    cur = conn.execute(
+        "UPDATE conversations SET pinned = ?, updated_at = updated_at WHERE id = ?",
+        (1 if pinned else 0, conversation_id),
     )
     conn.commit()
     return cur.rowcount > 0

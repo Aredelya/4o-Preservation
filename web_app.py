@@ -68,6 +68,7 @@ from core import (
     stream_openai,
     summarize_content,
     update_memory_suggestion,
+    update_conversation_pinned,
     update_conversation_title,
 )
 
@@ -545,8 +546,9 @@ class ChatHandler(BaseHTTPRequestHandler):
                         "title": title,
                         "created_at": created_at,
                         "snippet": snippet,
+                        "pinned": pinned,
                     }
-                    for convo_id, title, created_at, snippet in search_conversations(conn, query)
+                    for convo_id, title, created_at, snippet, pinned in search_conversations(conn, query)
                 ]
             else:
                 conversations = [
@@ -554,8 +556,9 @@ class ChatHandler(BaseHTTPRequestHandler):
                         "id": convo_id,
                         "title": title,
                         "created_at": created_at,
+                        "pinned": pinned,
                     }
-                    for convo_id, title, created_at in list_conversations(conn)
+                    for convo_id, title, created_at, pinned in list_conversations(conn)
                 ]
 
         return {"conversations": conversations}
@@ -606,6 +609,9 @@ class ChatHandler(BaseHTTPRequestHandler):
                         "requested_model": str(metadata.get("requested_model") or "").strip(),
                         "reasoning_enabled": bool(metadata.get("reasoning_enabled", False)),
                         "reasoning_effort": str(metadata.get("reasoning_effort") or "").strip(),
+                        "requested_reasoning_effort": str(
+                            metadata.get("requested_reasoning_effort") or ""
+                        ).strip(),
                         "has_inspectable_attachments": has_inspectable_attachments,
                         "attachments": extract_message_attachment_cards(message.content),
                         "attachment_status": attachment_status,
@@ -760,6 +766,16 @@ class ChatHandler(BaseHTTPRequestHandler):
             attachment_count=attachment_count,
         )
 
+    def _get_regenerate_instruction(self, payload: dict) -> str:
+        mode = str(payload.get("regenerate_mode") or "same").strip().lower()
+        if mode == "concise":
+            return "For this regeneration, answer more concisely while preserving the useful substance."
+        if mode == "detailed":
+            return "For this regeneration, provide a more detailed answer with clearer reasoning and examples where useful."
+        if mode == "higher_reasoning":
+            return "For this regeneration, spend extra effort checking the answer and resolving tricky parts carefully."
+        return ""
+
     def _parse_reinspect_message_ids(self, payload: dict) -> list[int]:
         parsed: list[int] = []
         seen = set()
@@ -782,6 +798,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             "requested_model": chat_options.get("requested_model") or response_text.model,
             "reasoning_enabled": bool(chat_options.get("reasoning_enabled")),
             "reasoning_effort": response_text.reasoning_effort,
+            "requested_reasoning_effort": chat_options.get("requested_reasoning_effort"),
         }
         if inspected_attachment_message_ids:
             metadata["inspected_attachment_message_ids"] = [
@@ -1080,6 +1097,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 "requested_model": chat_options["requested_model"],
                 "reasoning_enabled": chat_options["reasoning_enabled"],
                 "reasoning_effort": response_text.reasoning_effort,
+                "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
             },
         }
 
@@ -1172,6 +1190,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                                 "requested_model": chat_options["requested_model"],
                                 "reasoning_enabled": chat_options["reasoning_enabled"],
                                 "reasoning_effort": response_text.reasoning_effort,
+                                "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
                                 "inspected_attachment_message_ids": inspected_attachment_message_ids,
                             },
                         ),
@@ -1188,6 +1207,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                                 "requested_model": chat_options["requested_model"],
                                 "reasoning_enabled": chat_options["reasoning_enabled"],
                                 "reasoning_effort": response_text.reasoning_effort,
+                                "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
                             },
                         }
                     )
@@ -1251,6 +1271,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                                     "requested_model": chat_options["requested_model"],
                                     "reasoning_enabled": chat_options["reasoning_enabled"],
                                     "reasoning_effort": response_reasoning_effort,
+                                    "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
                                     "inspected_attachment_message_ids": inspected_attachment_message_ids,
                                 },
                             ),
@@ -1267,6 +1288,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                                     "requested_model": chat_options["requested_model"],
                                     "reasoning_enabled": chat_options["reasoning_enabled"],
                                     "reasoning_effort": response_reasoning_effort,
+                                    "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
                                 },
                             }
                         )
@@ -1442,6 +1464,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 "requested_model": chat_options["requested_model"],
                 "reasoning_enabled": chat_options["reasoning_enabled"],
                 "reasoning_effort": response_text.reasoning_effort,
+                "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
             },
         }
 
@@ -1546,6 +1569,9 @@ class ChatHandler(BaseHTTPRequestHandler):
                 conversation_id=conversation_id,
                 current_user_message=original_user_message,
             )
+            regenerate_instruction = self._get_regenerate_instruction(payload)
+            if regenerate_instruction:
+                system_prompt = f"{system_prompt}\n\n{regenerate_instruction}"
             messages = [Message("system", system_prompt), *history, original_user_message]
 
             try:
@@ -1610,6 +1636,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 "requested_model": chat_options["requested_model"],
                 "reasoning_enabled": chat_options["reasoning_enabled"],
                 "reasoning_effort": response_text.reasoning_effort,
+                "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
             },
             "source_user_message": {
                 "id": user_row["id"],
@@ -1687,6 +1714,9 @@ class ChatHandler(BaseHTTPRequestHandler):
                 conversation_id=conversation_id,
                 current_user_message=original_user_message,
             )
+            regenerate_instruction = self._get_regenerate_instruction(payload)
+            if regenerate_instruction:
+                system_prompt = f"{system_prompt}\n\n{regenerate_instruction}"
             messages = [Message("system", system_prompt), *history, original_user_message]
 
             self._send_sse_headers()
@@ -1744,6 +1774,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                                 "requested_model": chat_options["requested_model"],
                                 "reasoning_enabled": chat_options["reasoning_enabled"],
                                 "reasoning_effort": response_text.reasoning_effort,
+                                "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
                             },
                             "source_user_message": {
                                 "id": user_row["id"],
@@ -1828,6 +1859,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                                     "requested_model": chat_options["requested_model"],
                                     "reasoning_enabled": chat_options["reasoning_enabled"],
                                     "reasoning_effort": response_reasoning_effort,
+                                    "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
                                     "inspected_attachment_message_ids": inspected_attachment_message_ids,
                                 },
                             ),
@@ -1846,6 +1878,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                                     "requested_model": chat_options["requested_model"],
                                     "reasoning_enabled": chat_options["reasoning_enabled"],
                                     "reasoning_effort": response_reasoning_effort,
+                                    "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
                                 },
                                 "source_user_message": {
                                     "id": user_row["id"],
@@ -1866,6 +1899,14 @@ class ChatHandler(BaseHTTPRequestHandler):
         with connect_db() as conn:
             deleted = delete_conversation(conn, conversation_id)
         return {"deleted": deleted}
+
+    def _handle_pin_conversation(self, conversation_id: str, payload: dict) -> dict:
+        pinned = bool(payload.get("pinned", False))
+        with connect_db() as conn:
+            if not conversation_exists(conn, conversation_id):
+                raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
+            updated = update_conversation_pinned(conn, conversation_id, pinned)
+        return {"updated": updated, "pinned": pinned}
 
     def _handle_delete_memory(self, memory_id_str: str) -> dict:
         try:
@@ -2039,6 +2080,11 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             if parts == ["api", "conversations"]:
                 self._send_json(self._handle_create_conversation(), HTTPStatus.CREATED)
+                return
+
+            if len(parts) == 4 and parts[:2] == ["api", "conversations"] and parts[3] == "pin":
+                payload = self._read_json()
+                self._send_json(self._handle_pin_conversation(parts[2], payload))
                 return
 
             if parts == ["api", "send"]:
