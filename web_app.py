@@ -746,11 +746,18 @@ class ChatHandler(BaseHTTPRequestHandler):
             "reasoning_efforts": list(REASONING_EFFORT_OPTIONS),
         }
 
-    def _resolve_chat_options(self, payload: dict) -> dict:
+    def _resolve_chat_options(
+        self,
+        payload: dict,
+        prompt_text: str = "",
+        attachment_count: int = 0,
+    ) -> dict:
         return resolve_chat_settings(
             payload.get("model"),
             enable_reasoning=bool(payload.get("enable_reasoning", False)),
             reasoning_effort=payload.get("reasoning_effort"),
+            prompt_text=prompt_text,
+            attachment_count=attachment_count,
         )
 
     def _parse_reinspect_message_ids(self, payload: dict) -> list[int]:
@@ -986,7 +993,7 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         web_search_mode = "off"
         enable_code_interpreter = bool(payload.get("enable_code_interpreter", True))
-        chat_options = self._resolve_chat_options(payload)
+        chat_options = self._resolve_chat_options(payload, content, len(attachments))
         reinspect_message_ids = self._parse_reinspect_message_ids(payload)
         if content.lower().startswith("/web "):
             web_search_mode = "force"
@@ -1095,7 +1102,7 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         web_search_mode = "off"
         enable_code_interpreter = bool(payload.get("enable_code_interpreter", True))
-        chat_options = self._resolve_chat_options(payload)
+        chat_options = self._resolve_chat_options(payload, content, len(attachments))
         reinspect_message_ids = self._parse_reinspect_message_ids(payload)
         if content.lower().startswith("/web "):
             web_search_mode = "force"
@@ -1329,7 +1336,7 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         web_search_mode = "off"
         enable_code_interpreter = bool(payload.get("enable_code_interpreter", True))
-        chat_options = self._resolve_chat_options(payload)
+        chat_options = self._resolve_chat_options(payload, content, len(attachments))
         reinspect_message_ids = self._parse_reinspect_message_ids(payload)
         if content.lower().startswith("/web "):
             web_search_mode = "force"
@@ -1450,7 +1457,6 @@ class ChatHandler(BaseHTTPRequestHandler):
             raise ApiError("Missing conversation_id")
 
         enable_code_interpreter = bool(payload.get("enable_code_interpreter", True))
-        chat_options = self._resolve_chat_options(payload)
 
         with connect_db() as conn:
             if not conversation_exists(conn, conversation_id):
@@ -1471,6 +1477,11 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             original_content = str(user_row["content"] or "").strip()
             original_user_message = message_from_row(user_row)
+            attachment_count = 1 if raw_content_has_inspectable_attachments(
+                user_row["raw_content"],
+                user_row["content"],
+            ) else 0
+            chat_options = self._resolve_chat_options(payload, original_content, attachment_count)
 
             if original_content.lower().startswith("/image "):
                 raw_image_command = original_content[7:].strip()
@@ -1618,7 +1629,6 @@ class ChatHandler(BaseHTTPRequestHandler):
             raise ApiError("Missing conversation_id")
 
         enable_code_interpreter = bool(payload.get("enable_code_interpreter", True))
-        chat_options = self._resolve_chat_options(payload)
 
         with connect_db() as conn:
             if not conversation_exists(conn, conversation_id):
@@ -1639,6 +1649,11 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             original_content = str(user_row["content"] or "").strip()
             original_user_message = message_from_row(user_row)
+            attachment_count = 1 if raw_content_has_inspectable_attachments(
+                user_row["raw_content"],
+                user_row["content"],
+            ) else 0
+            chat_options = self._resolve_chat_options(payload, original_content, attachment_count)
 
             if original_content.lower().startswith("/image "):
                 result = self._handle_regenerate_message(payload)

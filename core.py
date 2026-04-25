@@ -50,9 +50,10 @@ FILE_SEARCH_MAX_RESULTS = int(os.environ.get("CHATBOT_FILE_SEARCH_MAX_RESULTS", 
 FILE_SEARCH_POLL_SECONDS = float(os.environ.get("CHATBOT_FILE_SEARCH_POLL_SECONDS", "20"))
 FILE_SEARCH_POLL_INTERVAL = float(os.environ.get("CHATBOT_FILE_SEARCH_POLL_INTERVAL", "1.5"))
 OPENAI_VECTOR_STORE_ID = os.environ.get("OPENAI_VECTOR_STORE_ID", "").strip()
-REASONING_EFFORT_OPTIONS = ("low", "medium", "high")
+API_REASONING_EFFORT_OPTIONS = ("low", "medium", "high")
+REASONING_EFFORT_OPTIONS = ("auto", *API_REASONING_EFFORT_OPTIONS)
 if DEFAULT_REASONING_EFFORT not in REASONING_EFFORT_OPTIONS:
-    DEFAULT_REASONING_EFFORT = "medium"
+    DEFAULT_REASONING_EFFORT = "auto"
 MODEL_MEMORY_SUGGESTIONS_ENABLED = os.environ.get("CHATBOT_MODEL_MEMORY_SUGGESTIONS", "1").lower() not in {"0", "false", "no"}
 MODEL_MEMORY_SUGGESTION_MODEL = os.environ.get("CHATBOT_MODEL_MEMORY_SUGGESTION_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
 MODEL_MEMORY_SUGGESTION_MAX = max(1, int(os.environ.get("CHATBOT_MODEL_MEMORY_SUGGESTION_MAX", "4")))
@@ -134,15 +135,90 @@ def reasoning_model_supported(model: Optional[str]) -> bool:
 
 def normalize_reasoning_effort(effort: Optional[str]) -> str:
     normalized = str(effort or "").strip().lower()
-    if normalized in REASONING_EFFORT_OPTIONS:
+    if normalized in API_REASONING_EFFORT_OPTIONS:
         return normalized
-    return DEFAULT_REASONING_EFFORT
+    if DEFAULT_REASONING_EFFORT in API_REASONING_EFFORT_OPTIONS:
+        return DEFAULT_REASONING_EFFORT
+    return "medium"
+
+
+def resolve_auto_reasoning_effort(
+    prompt_text: Optional[str] = None,
+    attachment_count: int = 0,
+) -> str:
+    text = str(prompt_text or "").strip().lower()
+    if not text and attachment_count <= 0:
+        return "medium"
+
+    score = 0
+    word_count = len(re.findall(r"\w+", text))
+
+    if word_count >= 220:
+        score += 2
+    elif word_count >= 70:
+        score += 1
+
+    if attachment_count > 0:
+        score += 2
+
+    if "```" in text or re.search(r"\b(traceback|exception|stack trace|diff|patch)\b", text):
+        score += 2
+
+    high_effort_terms = (
+        "analyze",
+        "architecture",
+        "debug",
+        "derive",
+        "diagnose",
+        "implement",
+        "optimize",
+        "prove",
+        "reason",
+        "refactor",
+        "security",
+        "tradeoff",
+    )
+    medium_effort_terms = (
+        "compare",
+        "explain",
+        "plan",
+        "review",
+        "summarize",
+        "why",
+    )
+
+    if any(term in text for term in high_effort_terms):
+        score += 2
+    elif any(term in text for term in medium_effort_terms):
+        score += 1
+
+    if re.search(r"\b(code|algorithm|bug|test|tests|api|database|schema)\b", text):
+        score += 1
+
+    if score >= 4:
+        return "high"
+    if score >= 2:
+        return "medium"
+    return "low"
+
+
+def resolve_reasoning_effort(
+    effort: Optional[str],
+    prompt_text: Optional[str] = None,
+    attachment_count: int = 0,
+) -> str:
+    normalized = str(effort or "").strip().lower()
+    if normalized == "auto" or (not normalized and DEFAULT_REASONING_EFFORT == "auto"):
+        return resolve_auto_reasoning_effort(prompt_text, attachment_count)
+    return normalize_reasoning_effort(effort)
 
 
 def resolve_chat_settings(
     model: Optional[str] = None,
     enable_reasoning: bool = False,
     reasoning_effort: Optional[str] = None,
+    prompt_text: Optional[str] = None,
+    attachment_count: int = 0,
 ) -> dict:
     requested_model = normalize_chat_model(model)
     resolved_model = requested_model
@@ -150,7 +226,11 @@ def resolve_chat_settings(
     reasoning_enabled = bool(enable_reasoning)
 
     if reasoning_enabled:
-        resolved_reasoning_effort = normalize_reasoning_effort(reasoning_effort)
+        resolved_reasoning_effort = resolve_reasoning_effort(
+            reasoning_effort,
+            prompt_text=prompt_text,
+            attachment_count=attachment_count,
+        )
         if not reasoning_model_supported(resolved_model):
             resolved_model = DEFAULT_REASONING_MODEL
 
