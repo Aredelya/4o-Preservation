@@ -1,4 +1,4 @@
-const state = {
+﻿const state = {
   conversations: [],
   activeConversation: null,
   memories: [],
@@ -113,13 +113,16 @@ const populateChatSettingsControls = () => {
 
   if (reasoningEffortSelect) {
     reasoningEffortSelect.innerHTML = "";
-    for (const effort of settings.reasoning_efforts || ["low", "medium", "high"]) {
+    for (const effort of settings.reasoning_efforts || ["auto", "low", "medium", "high"]) {
       const option = document.createElement("option");
       option.value = effort;
       option.textContent = effort.charAt(0).toUpperCase() + effort.slice(1);
       reasoningEffortSelect.appendChild(option);
     }
-    reasoningEffortSelect.value = selectedReasoningEffort;
+    const availableEfforts = [...reasoningEffortSelect.options].map((option) => option.value);
+    reasoningEffortSelect.value = availableEfforts.includes(selectedReasoningEffort)
+      ? selectedReasoningEffort
+      : settings.default_reasoning_effort;
   }
 
   if (enableReasoningInput) {
@@ -132,7 +135,7 @@ const populateChatSettingsControls = () => {
 const getSelectedChatOptions = () => ({
   model: modelSelect?.value || state.settings?.default_model || "",
   enable_reasoning: !!enableReasoningInput?.checked,
-  reasoning_effort: reasoningEffortSelect?.value || state.settings?.default_reasoning_effort || "medium",
+  reasoning_effort: reasoningEffortSelect?.value || state.settings?.default_reasoning_effort || "auto",
 });
 
 const mobileHistoryMedia = window.matchMedia("(max-width: 1100px) and (orientation: portrait)");
@@ -3382,7 +3385,7 @@ if (enableReasoningInput) {
 
 if (reasoningEffortSelect) {
   reasoningEffortSelect.addEventListener("change", () => {
-    window.localStorage.setItem(REASONING_EFFORT_STORAGE_KEY, reasoningEffortSelect.value || "medium");
+    window.localStorage.setItem(REASONING_EFFORT_STORAGE_KEY, reasoningEffortSelect.value || "auto");
   });
 }
 
