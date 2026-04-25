@@ -268,8 +268,13 @@ h2 {
 
 .list-item {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 8px;
+}
+
+.list-item.pinned button:first-child {
+  border-color: rgba(255, 205, 112, 0.32);
+  background: linear-gradient(180deg, rgba(255, 205, 112, 0.12), rgba(122, 162, 255, 0.06));
 }
 
 .list-item button {
@@ -296,6 +301,15 @@ h2 {
   color: var(--danger);
   border-color: rgba(255, 118, 118, 0.22);
   background: rgba(255, 118, 118, 0.06);
+}
+
+.list-item .conversation-pin {
+  min-width: 42px;
+  padding-inline: 0;
+  text-align: center;
+  color: #ffd987;
+  border-color: rgba(255, 205, 112, 0.24);
+  background: rgba(255, 205, 112, 0.07);
 }
 
 .status {
@@ -396,6 +410,12 @@ h2 {
 
 .message-action-button {
   padding: 7px 10px;
+  font-size: 0.85rem;
+}
+
+.message-action-select {
+  min-width: 136px;
+  padding: 7px 9px;
   font-size: 0.85rem;
 }
 
@@ -2205,19 +2225,48 @@ h2 {
   color: rgba(226, 255, 236, 0.94);
 }
 
+.composer-context-chip.draft-attachment {
+  max-width: min(100%, 360px);
+  border-radius: 10px;
+}
+
+.composer-context-chip.draft-attachment span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-context-chip.clear-attachments {
+  border-style: dashed;
+}
+
+.composer-context-preview,
 .composer-context-remove {
   padding: 0;
-  width: 18px;
-  height: 18px;
-  min-height: 18px;
   border: none;
   background: transparent;
   color: inherit;
-  font-size: 0.95rem;
   line-height: 1;
   opacity: 0.8;
 }
 
+.composer-context-preview {
+  width: auto;
+  min-height: 0;
+  font-size: 0.76rem;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.composer-context-remove {
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  font-size: 0.95rem;
+}
+
+.composer-context-preview:hover:not(:disabled),
 .composer-context-remove:hover:not(:disabled) {
   transform: none;
   opacity: 1;

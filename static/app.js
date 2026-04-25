@@ -1125,6 +1125,69 @@ const clearDraftAttachments = () => {
   updateComposerContext();
 };
 
+const formatFileSize = (bytes = 0) => {
+  const size = Number(bytes) || 0;
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+const setDraftFiles = (files) => {
+  if (!fileInput) return;
+  if (typeof DataTransfer === "undefined") {
+    fileInput.value = "";
+    updateComposerContext();
+    return;
+  }
+
+  const transfer = new DataTransfer();
+  for (const file of files) {
+    transfer.items.add(file);
+  }
+  fileInput.files = transfer.files;
+  updateComposerContext();
+};
+
+const removeDraftAttachmentAt = (index) => {
+  const files = Array.from(fileInput?.files || []);
+  const nextFiles = files.filter((_, fileIndex) => fileIndex !== index);
+  setDraftFiles(nextFiles);
+};
+
+const previewDraftAttachment = async (file) => {
+  if (!file) return;
+
+  try {
+    if (file.type.startsWith("image/")) {
+      const dataUrl = await readFileAsDataURL(file, "image");
+      openAttachmentLightbox(dataUrl, file.name || "Attachment preview");
+      return;
+    }
+
+    if (isTextLikeAttachment(file)) {
+      const text = await file.text();
+      openAttachmentPreview({
+        title: file.name || "Attachment preview",
+        text,
+      });
+      return;
+    }
+
+    if (getFileExtension(file.name) === ".pdf" || file.type === "application/pdf") {
+      const dataUrl = await readFileAsDataURL(file, "file");
+      openAttachmentPreview({
+        title: file.name || "Attachment preview",
+        pdfUrl: dataUrl,
+      });
+      return;
+    }
+
+    setStatus(`No preview available for ${file.name}.`, "", 2200);
+  } catch (error) {
+    setStatus(`Failed to preview attachment: ${error.message}`, "error");
+  }
+};
+
 const isImageCommandDraft = (value = "") =>
   String(value).trimStart().toLowerCase().startsWith("/image ");
 
@@ -1173,15 +1236,29 @@ const updateComposerContext = () => {
 
   const selectedFiles = Array.from(fileInput?.files || []);
   if (selectedFiles.length) {
-    chips.push({
-      label: selectedFiles.length === 1
-        ? "1 attachment ready"
-        : `${selectedFiles.length} attachments ready`,
-      className: "attachments",
-      removable: true,
-      onRemove: () => clearDraftAttachments(),
-      title: selectedFiles.map((file) => file.name).join(", "),
+    selectedFiles.forEach((file, index) => {
+      chips.push({
+        label: `${file.name || "Attachment"} · ${formatFileSize(file.size)}`,
+        className: "attachments draft-attachment",
+        removable: true,
+        previewable: true,
+        onPreview: () => {
+          void previewDraftAttachment(file);
+        },
+        onRemove: () => removeDraftAttachmentAt(index),
+        title: file.type || "Attachment",
+      });
     });
+
+    if (selectedFiles.length > 1) {
+      chips.push({
+        label: "Clear attachments",
+        className: "attachments clear-attachments",
+        removable: true,
+        onRemove: () => clearDraftAttachments(),
+        title: "Remove all selected attachments.",
+      });
+    }
   }
 
   composerContext.hidden = chips.length === 0;
@@ -1197,6 +1274,15 @@ const updateComposerContext = () => {
     const label = document.createElement("span");
     label.textContent = chipData.label;
     chip.appendChild(label);
+
+    if (chipData.previewable) {
+      const previewButton = document.createElement("button");
+      previewButton.type = "button";
+      previewButton.className = "composer-context-preview";
+      previewButton.textContent = "Preview";
+      previewButton.onclick = chipData.onPreview;
+      chip.appendChild(previewButton);
+    }
 
     if (chipData.removable) {
       const removeButton = document.createElement("button");
@@ -1269,13 +1355,20 @@ const createStreamingAssistantRow = (content = "Thinking...") => {
   return { row, bubble, activityTimeline };
 };
 
-const regenerateAssistantMessage = async (message) => {
+const regenerateAssistantMessage = async (message, options = {}) => {
   if (!message || message.role !== "assistant" || !message.id) return;
   if (!state.activeConversation || state.isSending) return;
 
+  const regenerateMode = String(options.mode || "same").trim().toLowerCase() || "same";
+  const selectedChatOptions = getSelectedChatOptions();
+  if (regenerateMode === "higher_reasoning") {
+    selectedChatOptions.enable_reasoning = true;
+    selectedChatOptions.reasoning_effort = "high";
+  }
+
   setComposerBusy(true);
   setEditingState(null);
-  setStatus("Regenerating response...");
+  setStatus(regenerateMode === "same" ? "Regenerating response..." : "Regenerating response with options...");
 
   const tailRows = getTailRowsFromMessageId(message.id);
   setRowsDimmed(tailRows, true);
@@ -1306,7 +1399,8 @@ const regenerateAssistantMessage = async (message) => {
         message_id: message.id,
         enable_web_search: !!enableWebSearchInput?.checked,
         enable_code_interpreter: !!enableCodeInterpreterInput?.checked,
-        ...getSelectedChatOptions(),
+        regenerate_mode: regenerateMode,
+        ...selectedChatOptions,
       }, {
         signal: controller.signal,
         onEvent: (event) => {
@@ -1848,6 +1942,7 @@ const normalizeAssistantModelInfo = (message) => {
   const requestedModel = String(message.requested_model || "").trim();
   const reasoningEnabled = !!message.reasoning_enabled;
   const reasoningEffort = String(message.reasoning_effort || "").trim();
+  const requestedReasoningEffort = String(message.requested_reasoning_effort || "").trim();
 
   if (actualModel) {
     chips.push({
@@ -1859,10 +1954,15 @@ const normalizeAssistantModelInfo = (message) => {
   }
 
   if (reasoningEnabled) {
-    const label = reasoningEffort ? `Reasoning: ${reasoningEffort}` : "Reasoning";
+    const usedAuto = requestedReasoningEffort === "auto" && reasoningEffort;
+    const label = usedAuto
+      ? `Reasoning: Auto -> ${reasoningEffort}`
+      : (reasoningEffort ? `Reasoning: ${reasoningEffort}` : "Reasoning");
     chips.push({
       label,
-      title: reasoningEffort
+      title: usedAuto
+        ? `Reasoning mode used Auto and resolved to ${reasoningEffort}`
+        : reasoningEffort
         ? `Reasoning mode enabled (${reasoningEffort})`
         : "Reasoning mode enabled",
     });
@@ -2400,12 +2500,23 @@ const createMessageElement = (message) => {
   }
 
   if (message.role === "assistant" && message.id) {
+    const regenerateModeSelect = document.createElement("select");
+    regenerateModeSelect.className = "message-action-select";
+    regenerateModeSelect.setAttribute("aria-label", "Regenerate option");
+    regenerateModeSelect.innerHTML = `
+      <option value="same">Same settings</option>
+      <option value="concise">More concise</option>
+      <option value="detailed">More detailed</option>
+      <option value="higher_reasoning">Higher reasoning</option>
+    `;
+    actions.appendChild(regenerateModeSelect);
+
     const regenerateButton = document.createElement("button");
     regenerateButton.type = "button";
     regenerateButton.className = "secondary message-action-button";
     regenerateButton.textContent = "Regenerate";
     regenerateButton.onclick = () => {
-      void regenerateAssistantMessage(message);
+      void regenerateAssistantMessage(message, { mode: regenerateModeSelect.value });
     };
     actions.appendChild(regenerateButton);
   }
@@ -2457,10 +2568,10 @@ const renderConversations = () => {
 
   for (const convo of state.conversations) {
     const row = document.createElement("div");
-    row.className = "list-item";
+    row.className = `list-item${convo.pinned ? " pinned" : ""}`;
 
     const button = document.createElement("button");
-    const title = `${convo.title || "Untitled"} · ${convo.id.slice(0, 8)}`;
+    const title = `${convo.pinned ? "Pinned · " : ""}${convo.title || "Untitled"} · ${convo.id.slice(0, 8)}`;
     const snippet = (convo.snippet || "").replace(/\s+/g, " ").trim();
     const preview = snippet.length > 96 ? `${snippet.slice(0, 93)}...` : snippet;
 
@@ -2469,6 +2580,24 @@ const renderConversations = () => {
     button.type = "button";
     button.onclick = () => {
       void selectConversation(convo.id);
+    };
+
+    const pin = document.createElement("button");
+    pin.className = "conversation-pin";
+    pin.textContent = convo.pinned ? "★" : "☆";
+    pin.type = "button";
+    pin.title = convo.pinned ? "Unpin conversation" : "Pin conversation";
+    pin.setAttribute("aria-label", pin.title);
+    pin.onclick = async () => {
+      try {
+        await api(`/api/conversations/${encodeURIComponent(convo.id)}/pin`, {
+          method: "POST",
+          body: JSON.stringify({ pinned: !convo.pinned }),
+        });
+        await loadConversations({ refreshMessages: false });
+      } catch (error) {
+        setStatus(`Failed to update pin: ${error.message}`, "error");
+      }
     };
 
     const remove = document.createElement("button");
@@ -2488,6 +2617,7 @@ const renderConversations = () => {
     };
 
     row.appendChild(button);
+    row.appendChild(pin);
     row.appendChild(remove);
     conversationList.appendChild(row);
   }
