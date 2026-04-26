@@ -3336,7 +3336,15 @@ def build_system_prompt(
     else:
         memories_text = "- (none)"
 
-    prompt = SYSTEM_PROMPT_TEMPLATE.format(memories=memories_text)
+    now_utc = datetime.now(timezone.utc)
+    calendar_context = (
+        "\nCurrent date/time context:\n"
+        f"- Current UTC date: {now_utc.strftime('%Y-%m-%d')}\n"
+        f"- Current UTC timestamp: {now_utc.isoformat()}\n"
+        "- Treat relative dates like 'today', 'tomorrow', and 'yesterday' using this context."
+    )
+
+    prompt = SYSTEM_PROMPT_TEMPLATE.format(memories=memories_text) + calendar_context
     prompt += build_recent_attachment_guard_prompt(
         conn,
         conversation_id,
