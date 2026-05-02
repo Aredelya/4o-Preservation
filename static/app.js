@@ -2570,6 +2570,23 @@ const renderMessages = (messages = [], autoSnap = true) => {
 const renderConversations = () => {
   conversationList.innerHTML = "";
 
+  if (state.activeFolderId) {
+    const backRow = document.createElement("div");
+    backRow.className = "list-item";
+    const backBtn = document.createElement("button");
+    backBtn.type = "button";
+    backBtn.textContent = "← Back to all conversations";
+    backBtn.onclick = async () => {
+      state.activeFolderId = null;
+      await loadConversations({ refreshMessages: false });
+      if (state.activeConversation) {
+        await loadMessages(state.activeConversation);
+      }
+    };
+    backRow.appendChild(backBtn);
+    conversationList.appendChild(backRow);
+  }
+
   for (const folder of state.folders || []) {
     const folderRow = document.createElement("div");
     folderRow.className = `list-item${folder.pinned ? " pinned" : ""}`;
@@ -2600,6 +2617,18 @@ const renderConversations = () => {
     };
     folderRow.appendChild(folderLabel);
     folderRow.appendChild(pinFolder);
+    const deleteFolderBtn = document.createElement("button");
+    deleteFolderBtn.className = "danger";
+    deleteFolderBtn.type = "button";
+    deleteFolderBtn.textContent = "×";
+    deleteFolderBtn.title = "Delete folder";
+    deleteFolderBtn.onclick = async () => {
+      if (!confirm(`Delete folder "${folder.name}"?`)) return;
+      await api(`/api/folders/${encodeURIComponent(folder.id)}`, { method: "DELETE" });
+      if (state.activeFolderId === folder.id) state.activeFolderId = null;
+      await loadConversations({ refreshMessages: false });
+    };
+    folderRow.appendChild(deleteFolderBtn);
     conversationList.appendChild(folderRow);
   }
 

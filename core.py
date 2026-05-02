@@ -1002,6 +1002,12 @@ def list_folder_conversations(conn: sqlite3.Connection, folder_id: str) -> List[
     return [dict(row) for row in rows]
 
 
+def delete_conversation_folder(conn: sqlite3.Connection, folder_id: str) -> bool:
+    cur = conn.execute("DELETE FROM conversation_folders WHERE id = ?", (folder_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
 def list_memories(conn: sqlite3.Connection) -> List[MemoryRecord]:
     rows = conn.execute(
         """
