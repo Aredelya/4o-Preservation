@@ -592,6 +592,31 @@ class ChatHandler(BaseHTTPRequestHandler):
             assign_conversation_to_folder(conn, folder_id, conversation_id)
         return {"status": "ok"}
 
+            folders = list_conversation_folders(conn)
+        return {"conversations": conversations, "folders": folders}
+
+    def _handle_create_folder(self, payload: dict) -> dict:
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            raise ApiError("Folder name required")
+        with connect_db() as conn:
+            folder_id = create_conversation_folder(conn, name)
+        return {"id": folder_id, "name": name}
+
+    def _handle_pin_folder(self, folder_id: str, payload: dict) -> dict:
+        pinned = bool(payload.get("pinned", False))
+        with connect_db() as conn:
+            updated = update_folder_pinned(conn, folder_id, pinned)
+        return {"updated": updated, "pinned": pinned}
+
+    def _handle_add_conversation_to_folder(self, folder_id: str, payload: dict) -> dict:
+        conversation_id = str(payload.get("conversation_id") or "").strip()
+        if not conversation_id:
+            raise ApiError("conversation_id required")
+        with connect_db() as conn:
+            assign_conversation_to_folder(conn, folder_id, conversation_id)
+        return {"status": "ok"}
+
     def _get_folder_conversations(self, folder_id: str) -> dict:
         with connect_db() as conn:
             conversations = list_folder_conversations(conn, folder_id)
