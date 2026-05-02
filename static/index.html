@@ -186,14 +186,16 @@
                     <option value="">Loading models...</option>
                   </select>
                 </label>
-                <label class="search-toggle reasoning-toggle">
-                  <input type="checkbox" id="enableReasoning" />
-                  Use reasoning mode
-                </label>
-                <label class="search-toggle">
-                  <input type="checkbox" id="enableEditBranching" checked />
-                  Branch when editing
-                </label>
+                <div class="composer-inline-toggles">
+                  <label class="search-toggle reasoning-toggle">
+                    <input type="checkbox" id="enableReasoning" />
+                    Use reasoning mode
+                  </label>
+                  <label class="search-toggle branch-toggle">
+                    <input type="checkbox" id="enableEditBranching" checked />
+                    Branch when editing
+                  </label>
+                </div>
                 <label class="composer-setting">
                   <span>Reasoning effort</span>
                   <select id="reasoningEffort" aria-label="Reasoning effort" disabled>

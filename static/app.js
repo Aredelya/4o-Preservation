@@ -2592,7 +2592,7 @@ const renderConversations = () => {
     folderRow.className = `list-item${folder.pinned ? " pinned" : ""}`;
     const folderLabel = document.createElement("button");
     folderLabel.type = "button";
-    folderLabel.className = state.activeFolderId === folder.id ? "active" : "";
+    folderLabel.className = `list-primary${state.activeFolderId === folder.id ? " active" : ""}`;
     folderLabel.textContent = `${folder.pinned ? "📌 " : "📁 "}${folder.name} (${folder.conversation_count || 0})`;
     folderLabel.onclick = async () => {
       const data = await api(`/api/folders/${encodeURIComponent(folder.id)}/conversations`);
@@ -2615,8 +2615,8 @@ const renderConversations = () => {
       });
       await loadConversations({ refreshMessages: false });
     };
-    folderRow.appendChild(folderLabel);
-    folderRow.appendChild(pinFolder);
+    const folderActions = document.createElement("div");
+    folderActions.className = "list-item-actions";
     const deleteFolderBtn = document.createElement("button");
     deleteFolderBtn.className = "danger";
     deleteFolderBtn.type = "button";
@@ -2628,7 +2628,10 @@ const renderConversations = () => {
       if (state.activeFolderId === folder.id) state.activeFolderId = null;
       await loadConversations({ refreshMessages: false });
     };
-    folderRow.appendChild(deleteFolderBtn);
+    folderActions.appendChild(pinFolder);
+    folderActions.appendChild(deleteFolderBtn);
+    folderRow.appendChild(folderLabel);
+    folderRow.appendChild(folderActions);
     conversationList.appendChild(folderRow);
   }
 
@@ -2642,7 +2645,7 @@ const renderConversations = () => {
     const preview = snippet.length > 96 ? `${snippet.slice(0, 93)}...` : snippet;
 
     button.textContent = preview ? `${title}\n${preview}` : title;
-    button.className = convo.id === state.activeConversation ? "active" : "";
+    button.className = `list-primary${convo.id === state.activeConversation ? " active" : ""}`;
     button.type = "button";
     button.onclick = () => {
       void selectConversation(convo.id);
@@ -2682,8 +2685,8 @@ const renderConversations = () => {
       }
     };
 
-    row.appendChild(button);
-    row.appendChild(pin);
+    const actions = document.createElement("div");
+    actions.className = "list-item-actions";
     const addToFolder = document.createElement("button");
     addToFolder.className = "conversation-pin";
     addToFolder.textContent = "📁+";
@@ -2700,8 +2703,11 @@ const renderConversations = () => {
       setStatus("Conversation added to folder.", "", 2000);
       await loadConversations({ refreshMessages: false });
     };
-    row.appendChild(addToFolder);
-    row.appendChild(remove);
+    actions.appendChild(pin);
+    actions.appendChild(addToFolder);
+    actions.appendChild(remove);
+    row.appendChild(button);
+    row.appendChild(actions);
     conversationList.appendChild(row);
   }
 };
@@ -3415,7 +3421,7 @@ const sendMessage = async () => {
     await loadConversations({ refreshMessages: false });
     await loadMessages(targetConversationId);
     await loadMemories();
-    if (isEditing && result?.conversation_id) {
+    if (isEditing && result?.branched) {
       setStatus("Created a branched conversation from your edit.", "", 2500);
     } else {
       setStatus(isEditing ? "Message updated and response regenerated." : "", "", isEditing ? 2500 : 0);
