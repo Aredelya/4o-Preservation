@@ -610,6 +610,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         return {"updated": updated, "pinned": pinned}
 
     def _handle_add_conversation_to_folder(self, folder_id: str, payload: dict) -> dict:
+        # Keep folder helper methods grouped and consistently 4-space indented.
         conversation_id = str(payload.get("conversation_id") or "").strip()
         if not conversation_id:
             raise ApiError("conversation_id required")
@@ -621,6 +622,11 @@ class ChatHandler(BaseHTTPRequestHandler):
         with connect_db() as conn:
             conversations = list_folder_conversations(conn, folder_id)
         return {"conversations": conversations}
+
+    def _handle_delete_folder(self, folder_id: str) -> dict:
+        with connect_db() as conn:
+            deleted = delete_conversation_folder(conn, folder_id)
+        return {"deleted": deleted}
 
     def _handle_delete_folder(self, folder_id: str) -> dict:
         with connect_db() as conn:
