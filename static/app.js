@@ -2572,7 +2572,22 @@ const renderConversations = () => {
   for (const folder of state.folders || []) {
     const folderRow = document.createElement("div");
     folderRow.className = `list-item${folder.pinned ? " pinned" : ""}`;
-    folderRow.textContent = `${folder.pinned ? "📌 " : "📁 "}${folder.name} (${folder.conversation_count || 0})`;
+    const folderLabel = document.createElement("div");
+    folderLabel.textContent = `${folder.pinned ? "📌 " : "📁 "}${folder.name} (${folder.conversation_count || 0})`;
+    const pinFolder = document.createElement("button");
+    pinFolder.className = "conversation-pin";
+    pinFolder.textContent = folder.pinned ? "★" : "☆";
+    pinFolder.type = "button";
+    pinFolder.title = folder.pinned ? "Unpin folder" : "Pin folder";
+    pinFolder.onclick = async () => {
+      await api(`/api/folders/${encodeURIComponent(folder.id)}/pin`, {
+        method: "POST",
+        body: JSON.stringify({ pinned: !folder.pinned }),
+      });
+      await loadConversations({ refreshMessages: false });
+    };
+    folderRow.appendChild(folderLabel);
+    folderRow.appendChild(pinFolder);
     conversationList.appendChild(folderRow);
   }
 
@@ -2628,6 +2643,23 @@ const renderConversations = () => {
 
     row.appendChild(button);
     row.appendChild(pin);
+    const addToFolder = document.createElement("button");
+    addToFolder.className = "conversation-pin";
+    addToFolder.textContent = "📁+";
+    addToFolder.type = "button";
+    addToFolder.title = "Add to folder";
+    addToFolder.onclick = async () => {
+      const folderChoices = (state.folders || []).map((f) => `${f.id}: ${f.name}`).join("\n");
+      const folderId = window.prompt(`Paste folder id:\n${folderChoices}`);
+      if (!folderId) return;
+      await api(`/api/folders/${encodeURIComponent(folderId.trim())}/conversations`, {
+        method: "POST",
+        body: JSON.stringify({ conversation_id: convo.id }),
+      });
+      setStatus("Conversation added to folder.", "", 2000);
+      await loadConversations({ refreshMessages: false });
+    };
+    row.appendChild(addToFolder);
     row.appendChild(remove);
     conversationList.appendChild(row);
   }

@@ -63,6 +63,7 @@ from core import (
     normalize_chat_model,
     reasoning_model_supported,
     raw_content_has_inspectable_attachments,
+    replace_message_from_id,
     resolve_chat_settings,
     search_conversations,
     stream_openai,
@@ -1327,6 +1328,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         conversation_id = payload.get("conversation_id")
         content = (payload.get("content") or "").strip()
         attachments = self._validate_attachments(payload.get("attachments") or [])
+        enable_edit_branching = bool(payload.get("enable_edit_branching", True))
 
         try:
             message_id = int(payload.get("message_id"))
@@ -1345,14 +1347,21 @@ class ChatHandler(BaseHTTPRequestHandler):
                     raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
                 try:
                     image_prompt, image_options = parse_image_command(raw_image_command)
-                    original_title = get_conversation_title(conn, conversation_id) or "Chat"
-                    branch_conversation_id = create_conversation(conn, f"{original_title} (branch)")
-                    history_rows = get_all_messages_with_ids(conn, conversation_id)
-                    for row in history_rows:
-                        if row["id"] >= message_id:
-                            break
-                        add_message_returning_id(conn, branch_conversation_id, message_from_row(row))
-                    add_message_returning_id(conn, branch_conversation_id, Message("user", content))
+                    target_conversation_id = conversation_id
+                    if enable_edit_branching:
+                        original_title = get_conversation_title(conn, conversation_id) or "Chat"
+                        target_conversation_id = create_conversation(conn, f"{original_title} (branch)")
+                        history_rows = get_all_messages_with_ids(conn, conversation_id)
+                        for row in history_rows:
+                            if row["id"] >= message_id:
+                                break
+                            add_message_returning_id(conn, target_conversation_id, message_from_row(row))
+                        add_message_returning_id(conn, target_conversation_id, Message("user", content))
+                        folder_id = create_conversation_folder(conn, f"{original_title} branches")
+                        assign_conversation_to_folder(conn, folder_id, conversation_id)
+                        assign_conversation_to_folder(conn, folder_id, target_conversation_id)
+                    else:
+                        replace_message_from_id(conn, conversation_id, message_id, Message("user", content))
                     image_url = call_openai_image(image_prompt, **image_options)
                 except ValueError as exc:
                     raise ApiError(str(exc), HTTPStatus.BAD_REQUEST) from exc
@@ -1368,12 +1377,12 @@ class ChatHandler(BaseHTTPRequestHandler):
                 assistant_text = f"Generated image:\n\n![Generated image]({image_url})"
                 assistant_id = add_message_returning_id(
                     conn,
-                    branch_conversation_id,
+                    target_conversation_id,
                     Message("assistant", assistant_text),
                 )
             return {
                 "status": "ok",
-                "conversation_id": branch_conversation_id,
+                "conversation_id": target_conversation_id,
                 "edited_message": {
                     "id": message_id,
                     "role": "user",
