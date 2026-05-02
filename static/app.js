@@ -1,5 +1,6 @@
 ﻿const state = {
   conversations: [],
+  folders: [],
   activeConversation: null,
   memories: [],
   memorySuggestions: [],
@@ -44,6 +45,7 @@ const enableCodeInterpreterInput = document.getElementById("enableCodeInterprete
 const modelSelect = document.getElementById("modelSelect");
 const enableReasoningInput = document.getElementById("enableReasoning");
 const reasoningEffortSelect = document.getElementById("reasoningEffort");
+const enableEditBranchingInput = document.getElementById("enableEditBranching");
 const memoryInput = document.getElementById("memoryInput");
 const memoryKindInput = document.getElementById("memoryKind");
 const memoryScopeInput = document.getElementById("memoryScope");
@@ -54,6 +56,7 @@ const memoryList = document.getElementById("memoryList");
 const clearMemoriesBtn = document.getElementById("clearMemories");
 const conversationSearchInput = document.getElementById("conversationSearch");
 const clearConversationSearchBtn = document.getElementById("clearConversationSearch");
+const createFolderBtn = document.getElementById("createFolderBtn");
 const statusBanner = document.getElementById("statusBanner");
 const historyToggleBtn = document.getElementById("historyToggle");
 const closeHistoryBtn = document.getElementById("closeHistory");
@@ -2566,6 +2569,13 @@ const renderMessages = (messages = [], autoSnap = true) => {
 const renderConversations = () => {
   conversationList.innerHTML = "";
 
+  for (const folder of state.folders || []) {
+    const folderRow = document.createElement("div");
+    folderRow.className = `list-item${folder.pinned ? " pinned" : ""}`;
+    folderRow.textContent = `${folder.pinned ? "📌 " : "📁 "}${folder.name} (${folder.conversation_count || 0})`;
+    conversationList.appendChild(folderRow);
+  }
+
   for (const convo of state.conversations) {
     const row = document.createElement("div");
     row.className = `list-item${convo.pinned ? " pinned" : ""}`;
@@ -2989,6 +2999,7 @@ const loadConversations = async ({ refreshMessages = true } = {}) => {
   if (requestId !== latestConversationsRequest) return;
 
   state.conversations = data.conversations;
+  state.folders = data.folders || [];
 
   if (!state.activeConversation && state.conversations.length) {
     state.activeConversation = state.conversations[0].id;
@@ -3253,6 +3264,7 @@ const sendMessage = async () => {
       enable_code_interpreter: !!enableCodeInterpreterInput?.checked,
       reinspect_message_ids: [...(state.pendingReinspectMessageIds || [])],
       ...getSelectedChatOptions(),
+      enable_edit_branching: !!enableEditBranchingInput?.checked,
     };
 
     if (isEditing) {
@@ -3862,3 +3874,13 @@ window.addEventListener("load", scheduleMessageBottomSnap);
   handleComposerViewportChange();
 })();
 
+
+
+if (createFolderBtn) {
+  createFolderBtn.onclick = async () => {
+    const name = window.prompt("Folder name:");
+    if (!name) return;
+    await api("/api/folders", { method: "POST", body: JSON.stringify({ name }) });
+    await loadConversations({ refreshMessages: false });
+  };
+}

@@ -55,6 +55,7 @@ from core import (
     infer_inspected_attachment_message_ids,
     init_db,
     list_conversations,
+    list_conversation_folders,
     list_memories,
     list_memory_suggestions,
     load_env_file,
@@ -69,6 +70,9 @@ from core import (
     update_memory_suggestion,
     update_conversation_pinned,
     update_conversation_title,
+    create_conversation_folder,
+    assign_conversation_to_folder,
+    update_folder_pinned,
 )
 
 load_env_file(ENV_PATH)
@@ -560,7 +564,30 @@ class ChatHandler(BaseHTTPRequestHandler):
                     for convo_id, title, created_at, pinned in list_conversations(conn)
                 ]
 
-        return {"conversations": conversations}
+            folders = list_conversation_folders(conn)
+        return {"conversations": conversations, "folders": folders}
+
+    def _handle_create_folder(self, payload: dict) -> dict:
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            raise ApiError("Folder name required")
+        with connect_db() as conn:
+            folder_id = create_conversation_folder(conn, name)
+        return {"id": folder_id, "name": name}
+
+    def _handle_pin_folder(self, folder_id: str, payload: dict) -> dict:
+        pinned = bool(payload.get("pinned", False))
+        with connect_db() as conn:
+            updated = update_folder_pinned(conn, folder_id, pinned)
+        return {"updated": updated, "pinned": pinned}
+
+    def _handle_add_conversation_to_folder(self, folder_id: str, payload: dict) -> dict:
+        conversation_id = str(payload.get("conversation_id") or "").strip()
+        if not conversation_id:
+            raise ApiError("conversation_id required")
+        with connect_db() as conn:
+            assign_conversation_to_folder(conn, folder_id, conversation_id)
+        return {"status": "ok"}
 
     def _get_conversation_messages(self, conversation_id: str) -> dict:
         with connect_db() as conn:
@@ -960,6 +987,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         conversation_id = payload.get("conversation_id")
         content = (payload.get("content") or "").strip()
         attachments = self._validate_attachments(payload.get("attachments") or [])
+        enable_edit_branching = bool(payload.get("enable_edit_branching", True))
 
         if not conversation_id:
             raise ApiError("Missing conversation_id")
@@ -981,7 +1009,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 "title": new_title,
             }
 
-        if content.lower().startswith("/image "):
+        if content.lower().startswith("/image ") and enable_edit_branching:
             raw_image_command = content[7:].strip()
             with connect_db() as conn:
                 if not conversation_exists(conn, conversation_id):
@@ -1401,16 +1429,24 @@ class ChatHandler(BaseHTTPRequestHandler):
             messages = [Message("system", system_prompt), *history, user_message]
 
             try:
-                branch_conversation_id = create_conversation(conn, f"{original_title} (branch)")
-                for row in history_rows:
-                    add_message_returning_id(conn, branch_conversation_id, message_from_row(row))
-                edited_user_message_id = add_message_returning_id(
-                    conn, branch_conversation_id, user_message
-                )
+                target_conversation_id = conversation_id
+                edited_user_message_id = message_id
+                if enable_edit_branching:
+                    target_conversation_id = create_conversation(conn, f"{original_title} (branch)")
+                    for row in history_rows:
+                        add_message_returning_id(conn, target_conversation_id, message_from_row(row))
+                    edited_user_message_id = add_message_returning_id(
+                        conn, target_conversation_id, user_message
+                    )
+                    folder_id = create_conversation_folder(conn, f"{original_title} branches")
+                    assign_conversation_to_folder(conn, folder_id, conversation_id)
+                    assign_conversation_to_folder(conn, folder_id, target_conversation_id)
+                else:
+                    replace_message_from_id(conn, conversation_id, message_id, user_message)
                 auto_extract_memory_suggestions_from_user_text(
                     conn,
                     content,
-                    conversation_id=branch_conversation_id,
+                    conversation_id=target_conversation_id,
                     source_message_id=edited_user_message_id,
                 )
                 response_text = call_openai(
@@ -1443,7 +1479,7 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             assistant_id = add_message_returning_id(
                 conn,
-                branch_conversation_id,
+                target_conversation_id,
                 Message(
                     "assistant",
                     response_text.text,
@@ -1457,7 +1493,7 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         return {
             "status": "ok",
-            "conversation_id": branch_conversation_id,
+            "conversation_id": target_conversation_id,
             "edited_message": {
                 "id": edited_user_message_id,
                 "role": "user",
@@ -2090,10 +2126,22 @@ class ChatHandler(BaseHTTPRequestHandler):
             if parts == ["api", "conversations"]:
                 self._send_json(self._handle_create_conversation(), HTTPStatus.CREATED)
                 return
+            if parts == ["api", "folders"]:
+                payload = self._read_json()
+                self._send_json(self._handle_create_folder(payload), HTTPStatus.CREATED)
+                return
 
             if len(parts) == 4 and parts[:2] == ["api", "conversations"] and parts[3] == "pin":
                 payload = self._read_json()
                 self._send_json(self._handle_pin_conversation(parts[2], payload))
+                return
+            if len(parts) == 4 and parts[:2] == ["api", "folders"] and parts[3] == "pin":
+                payload = self._read_json()
+                self._send_json(self._handle_pin_folder(parts[2], payload))
+                return
+            if len(parts) == 4 and parts[:2] == ["api", "folders"] and parts[3] == "conversations":
+                payload = self._read_json()
+                self._send_json(self._handle_add_conversation_to_folder(parts[2], payload))
                 return
 
             if parts == ["api", "send"]:
