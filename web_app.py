@@ -63,7 +63,6 @@ from core import (
     normalize_chat_model,
     reasoning_model_supported,
     raw_content_has_inspectable_attachments,
-    replace_message_from_id,
     resolve_chat_settings,
     search_conversations,
     stream_openai,
