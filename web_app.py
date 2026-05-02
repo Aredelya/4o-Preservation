@@ -56,6 +56,7 @@ from core import (
     init_db,
     list_conversations,
     list_conversation_folders,
+    list_folder_conversations,
     list_memories,
     list_memory_suggestions,
     load_env_file,
@@ -589,6 +590,11 @@ class ChatHandler(BaseHTTPRequestHandler):
         with connect_db() as conn:
             assign_conversation_to_folder(conn, folder_id, conversation_id)
         return {"status": "ok"}
+
+    def _get_folder_conversations(self, folder_id: str) -> dict:
+        with connect_db() as conn:
+            conversations = list_folder_conversations(conn, folder_id)
+        return {"conversations": conversations}
 
     def _get_conversation_messages(self, conversation_id: str) -> dict:
         with connect_db() as conn:
@@ -2080,6 +2086,9 @@ class ChatHandler(BaseHTTPRequestHandler):
             
             if len(parts) == 3 and parts[:2] == ["api", "conversations"]:
                 self._send_json(self._get_conversation_messages(parts[2]))
+                return
+            if len(parts) == 4 and parts[:2] == ["api", "folders"] and parts[3] == "conversations":
+                self._send_json(self._get_folder_conversations(parts[2]))
                 return
 
             if len(parts) >= 4 and parts[:2] == ["api", "container-files"]:

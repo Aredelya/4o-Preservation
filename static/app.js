@@ -1,6 +1,7 @@
 ﻿const state = {
   conversations: [],
   folders: [],
+  activeFolderId: null,
   activeConversation: null,
   memories: [],
   memorySuggestions: [],
@@ -2572,8 +2573,19 @@ const renderConversations = () => {
   for (const folder of state.folders || []) {
     const folderRow = document.createElement("div");
     folderRow.className = `list-item${folder.pinned ? " pinned" : ""}`;
-    const folderLabel = document.createElement("div");
+    const folderLabel = document.createElement("button");
+    folderLabel.type = "button";
+    folderLabel.className = state.activeFolderId === folder.id ? "active" : "";
     folderLabel.textContent = `${folder.pinned ? "📌 " : "📁 "}${folder.name} (${folder.conversation_count || 0})`;
+    folderLabel.onclick = async () => {
+      const data = await api(`/api/folders/${encodeURIComponent(folder.id)}/conversations`);
+      state.activeFolderId = folder.id;
+      state.conversations = data.conversations || [];
+      state.activeConversation = state.conversations.length ? state.conversations[0].id : null;
+      renderConversations();
+      updateConversationActionState();
+      if (state.activeConversation) await loadMessages(state.activeConversation);
+    };
     const pinFolder = document.createElement("button");
     pinFolder.className = "conversation-pin";
     pinFolder.textContent = folder.pinned ? "★" : "☆";
@@ -3027,6 +3039,7 @@ const loadConversations = async ({ refreshMessages = true } = {}) => {
 
   const searchSuffix = query ? `?q=${encodeURIComponent(query)}` : "";
   const data = await api(`/api/conversations${searchSuffix}`);
+  state.activeFolderId = null;
 
   if (requestId !== latestConversationsRequest) return;
 

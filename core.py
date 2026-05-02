@@ -988,6 +988,20 @@ def assign_conversation_to_folder(conn: sqlite3.Connection, folder_id: str, conv
     conn.commit()
 
 
+def list_folder_conversations(conn: sqlite3.Connection, folder_id: str) -> List[dict]:
+    rows = conn.execute(
+        """
+        SELECT c.id, c.title, c.pinned, c.created_at
+        FROM folder_conversations fc
+        JOIN conversations c ON c.id = fc.conversation_id
+        WHERE fc.folder_id = ?
+        ORDER BY c.pinned DESC, c.updated_at DESC, c.created_at DESC
+        """,
+        (folder_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def list_memories(conn: sqlite3.Connection) -> List[MemoryRecord]:
     rows = conn.execute(
         """
