@@ -307,6 +307,23 @@ CREATE TABLE IF NOT EXISTS app_state (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS conversation_folders (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    pinned INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS folder_conversations (
+    folder_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (folder_id, conversation_id),
+    FOREIGN KEY(folder_id) REFERENCES conversation_folders(id) ON DELETE CASCADE,
+    FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS indexed_documents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_key TEXT NOT NULL UNIQUE,
@@ -491,6 +508,9 @@ def init_db(conn: sqlite3.Connection) -> None:
             WHERE updated_at IS NULL OR updated_at = ''
             """
         )
+    conn.commit()
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_folder_conversations_conversation_id ON folder_conversations (conversation_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_conversation_folders_pinned_updated ON conversation_folders (pinned DESC, updated_at DESC)")
     conn.commit()
 
     suggestion_columns = {
@@ -923,6 +943,63 @@ def delete_conversation(conn: sqlite3.Connection, conversation_id: str) -> bool:
     cleanup_orphaned_attachments(conn)
     conn.commit()
     return cur.rowcount > 0
+
+
+def create_conversation_folder(conn: sqlite3.Connection, name: str) -> str:
+    folder_id = str(uuid.uuid4())
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO conversation_folders (id, name, pinned, created_at, updated_at) VALUES (?, ?, 0, ?, ?)",
+        (folder_id, name.strip(), now, now),
+    )
+    conn.commit()
+    return folder_id
+
+
+def list_conversation_folders(conn: sqlite3.Connection) -> List[dict]:
+    rows = conn.execute(
+        """
+        SELECT f.id, f.name, f.pinned, f.created_at, f.updated_at, COUNT(fc.conversation_id) AS conversation_count
+        FROM conversation_folders f
+        LEFT JOIN folder_conversations fc ON fc.folder_id = f.id
+        GROUP BY f.id
+        ORDER BY f.pinned DESC, f.updated_at DESC, f.created_at DESC
+        """
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def update_folder_pinned(conn: sqlite3.Connection, folder_id: str, pinned: bool) -> bool:
+    cur = conn.execute(
+        "UPDATE conversation_folders SET pinned = ?, updated_at = ? WHERE id = ?",
+        (1 if pinned else 0, now_iso(), folder_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def assign_conversation_to_folder(conn: sqlite3.Connection, folder_id: str, conversation_id: str) -> None:
+    now = now_iso()
+    conn.execute(
+        "INSERT OR IGNORE INTO folder_conversations (folder_id, conversation_id, created_at) VALUES (?, ?, ?)",
+        (folder_id, conversation_id, now),
+    )
+    conn.execute("UPDATE conversation_folders SET updated_at = ? WHERE id = ?", (now, folder_id))
+    conn.commit()
+
+
+def list_folder_conversations(conn: sqlite3.Connection, folder_id: str) -> List[dict]:
+    rows = conn.execute(
+        """
+        SELECT c.id, c.title, c.pinned, c.created_at
+        FROM folder_conversations fc
+        JOIN conversations c ON c.id = fc.conversation_id
+        WHERE fc.folder_id = ?
+        ORDER BY c.pinned DESC, c.updated_at DESC, c.created_at DESC
+        """,
+        (folder_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def list_memories(conn: sqlite3.Connection) -> List[MemoryRecord]:
