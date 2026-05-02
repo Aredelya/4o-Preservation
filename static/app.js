@@ -1,5 +1,7 @@
 ﻿const state = {
   conversations: [],
+  folders: [],
+  activeFolderId: null,
   activeConversation: null,
   memories: [],
   memorySuggestions: [],
@@ -44,6 +46,7 @@ const enableCodeInterpreterInput = document.getElementById("enableCodeInterprete
 const modelSelect = document.getElementById("modelSelect");
 const enableReasoningInput = document.getElementById("enableReasoning");
 const reasoningEffortSelect = document.getElementById("reasoningEffort");
+const enableEditBranchingInput = document.getElementById("enableEditBranching");
 const memoryInput = document.getElementById("memoryInput");
 const memoryKindInput = document.getElementById("memoryKind");
 const memoryScopeInput = document.getElementById("memoryScope");
@@ -54,6 +57,7 @@ const memoryList = document.getElementById("memoryList");
 const clearMemoriesBtn = document.getElementById("clearMemories");
 const conversationSearchInput = document.getElementById("conversationSearch");
 const clearConversationSearchBtn = document.getElementById("clearConversationSearch");
+const createFolderBtn = document.getElementById("createFolderBtn");
 const statusBanner = document.getElementById("statusBanner");
 const historyToggleBtn = document.getElementById("historyToggle");
 const closeHistoryBtn = document.getElementById("closeHistory");
@@ -2566,6 +2570,68 @@ const renderMessages = (messages = [], autoSnap = true) => {
 const renderConversations = () => {
   conversationList.innerHTML = "";
 
+  if (state.activeFolderId) {
+    const backRow = document.createElement("div");
+    backRow.className = "list-item";
+    const backBtn = document.createElement("button");
+    backBtn.type = "button";
+    backBtn.textContent = "← Back to all conversations";
+    backBtn.onclick = async () => {
+      state.activeFolderId = null;
+      await loadConversations({ refreshMessages: false });
+      if (state.activeConversation) {
+        await loadMessages(state.activeConversation);
+      }
+    };
+    backRow.appendChild(backBtn);
+    conversationList.appendChild(backRow);
+  }
+
+  for (const folder of state.folders || []) {
+    const folderRow = document.createElement("div");
+    folderRow.className = `list-item${folder.pinned ? " pinned" : ""}`;
+    const folderLabel = document.createElement("button");
+    folderLabel.type = "button";
+    folderLabel.className = state.activeFolderId === folder.id ? "active" : "";
+    folderLabel.textContent = `${folder.pinned ? "📌 " : "📁 "}${folder.name} (${folder.conversation_count || 0})`;
+    folderLabel.onclick = async () => {
+      const data = await api(`/api/folders/${encodeURIComponent(folder.id)}/conversations`);
+      state.activeFolderId = folder.id;
+      state.conversations = data.conversations || [];
+      state.activeConversation = state.conversations.length ? state.conversations[0].id : null;
+      renderConversations();
+      updateConversationActionState();
+      if (state.activeConversation) await loadMessages(state.activeConversation);
+    };
+    const pinFolder = document.createElement("button");
+    pinFolder.className = "conversation-pin";
+    pinFolder.textContent = folder.pinned ? "★" : "☆";
+    pinFolder.type = "button";
+    pinFolder.title = folder.pinned ? "Unpin folder" : "Pin folder";
+    pinFolder.onclick = async () => {
+      await api(`/api/folders/${encodeURIComponent(folder.id)}/pin`, {
+        method: "POST",
+        body: JSON.stringify({ pinned: !folder.pinned }),
+      });
+      await loadConversations({ refreshMessages: false });
+    };
+    folderRow.appendChild(folderLabel);
+    folderRow.appendChild(pinFolder);
+    const deleteFolderBtn = document.createElement("button");
+    deleteFolderBtn.className = "danger";
+    deleteFolderBtn.type = "button";
+    deleteFolderBtn.textContent = "×";
+    deleteFolderBtn.title = "Delete folder";
+    deleteFolderBtn.onclick = async () => {
+      if (!confirm(`Delete folder "${folder.name}"?`)) return;
+      await api(`/api/folders/${encodeURIComponent(folder.id)}`, { method: "DELETE" });
+      if (state.activeFolderId === folder.id) state.activeFolderId = null;
+      await loadConversations({ refreshMessages: false });
+    };
+    folderRow.appendChild(deleteFolderBtn);
+    conversationList.appendChild(folderRow);
+  }
+
   for (const convo of state.conversations) {
     const row = document.createElement("div");
     row.className = `list-item${convo.pinned ? " pinned" : ""}`;
@@ -2618,6 +2684,23 @@ const renderConversations = () => {
 
     row.appendChild(button);
     row.appendChild(pin);
+    const addToFolder = document.createElement("button");
+    addToFolder.className = "conversation-pin";
+    addToFolder.textContent = "📁+";
+    addToFolder.type = "button";
+    addToFolder.title = "Add to folder";
+    addToFolder.onclick = async () => {
+      const folderChoices = (state.folders || []).map((f) => `${f.id}: ${f.name}`).join("\n");
+      const folderId = window.prompt(`Paste folder id:\n${folderChoices}`);
+      if (!folderId) return;
+      await api(`/api/folders/${encodeURIComponent(folderId.trim())}/conversations`, {
+        method: "POST",
+        body: JSON.stringify({ conversation_id: convo.id }),
+      });
+      setStatus("Conversation added to folder.", "", 2000);
+      await loadConversations({ refreshMessages: false });
+    };
+    row.appendChild(addToFolder);
     row.appendChild(remove);
     conversationList.appendChild(row);
   }
@@ -2985,10 +3068,12 @@ const loadConversations = async ({ refreshMessages = true } = {}) => {
 
   const searchSuffix = query ? `?q=${encodeURIComponent(query)}` : "";
   const data = await api(`/api/conversations${searchSuffix}`);
+  state.activeFolderId = null;
 
   if (requestId !== latestConversationsRequest) return;
 
   state.conversations = data.conversations;
+  state.folders = data.folders || [];
 
   if (!state.activeConversation && state.conversations.length) {
     state.activeConversation = state.conversations[0].id;
@@ -3253,6 +3338,7 @@ const sendMessage = async () => {
       enable_code_interpreter: !!enableCodeInterpreterInput?.checked,
       reinspect_message_ids: [...(state.pendingReinspectMessageIds || [])],
       ...getSelectedChatOptions(),
+      enable_edit_branching: !!enableEditBranchingInput?.checked,
     };
 
     if (isEditing) {
@@ -3320,11 +3406,20 @@ const sendMessage = async () => {
       pendingBubble.classList.remove("error");
     }
 
+    const targetConversationId =
+      isEditing && result?.conversation_id ? result.conversation_id : conversationId;
+    if (isEditing && result?.conversation_id) {
+      state.activeConversation = result.conversation_id;
+    }
     setEditingState(null);
     await loadConversations({ refreshMessages: false });
-    await loadMessages(conversationId);
+    await loadMessages(targetConversationId);
     await loadMemories();
-    setStatus(isEditing ? "Message updated and response regenerated." : "", "", isEditing ? 2500 : 0);
+    if (isEditing && result?.conversation_id) {
+      setStatus("Created a branched conversation from your edit.", "", 2500);
+    } else {
+      setStatus(isEditing ? "Message updated and response regenerated." : "", "", isEditing ? 2500 : 0);
+    }
   } catch (error) {
     if (error?.name === "AbortError") {
       if (pendingBubble) {
@@ -3853,3 +3948,13 @@ window.addEventListener("load", scheduleMessageBottomSnap);
   handleComposerViewportChange();
 })();
 
+
+
+if (createFolderBtn) {
+  createFolderBtn.onclick = async () => {
+    const name = window.prompt("Folder name:");
+    if (!name) return;
+    await api("/api/folders", { method: "POST", body: JSON.stringify({ name }) });
+    await loadConversations({ refreshMessages: false });
+  };
+}

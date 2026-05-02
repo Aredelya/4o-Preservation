@@ -62,6 +62,9 @@
         </div>
 
         <div class="mobile-history-hint">Your synced chat history lives here.</div>
+        <div class="row">
+          <button id="createFolderBtn" type="button" class="secondary">New folder</button>
+        </div>
         <div class="list" id="conversationList" aria-live="polite"></div>
       </section>
 
@@ -186,6 +189,10 @@
                 <label class="search-toggle reasoning-toggle">
                   <input type="checkbox" id="enableReasoning" />
                   Use reasoning mode
+                </label>
+                <label class="search-toggle">
+                  <input type="checkbox" id="enableEditBranching" checked />
+                  Branch when editing
                 </label>
                 <label class="composer-setting">
                   <span>Reasoning effort</span>
