@@ -62,7 +62,6 @@ from core import (
     normalize_chat_model,
     reasoning_model_supported,
     raw_content_has_inspectable_attachments,
-    replace_message_from_id,
     resolve_chat_settings,
     search_conversations,
     stream_openai,
@@ -1318,12 +1317,14 @@ class ChatHandler(BaseHTTPRequestHandler):
                     raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
                 try:
                     image_prompt, image_options = parse_image_command(raw_image_command)
-                    replace_message_from_id(
-                        conn,
-                        conversation_id,
-                        message_id,
-                        Message("user", content),
-                    )
+                    original_title = get_conversation_title(conn, conversation_id) or "Chat"
+                    branch_conversation_id = create_conversation(conn, f"{original_title} (branch)")
+                    history_rows = get_all_messages_with_ids(conn, conversation_id)
+                    for row in history_rows:
+                        if row["id"] >= message_id:
+                            break
+                        add_message_returning_id(conn, branch_conversation_id, message_from_row(row))
+                    add_message_returning_id(conn, branch_conversation_id, Message("user", content))
                     image_url = call_openai_image(image_prompt, **image_options)
                 except ValueError as exc:
                     raise ApiError(str(exc), HTTPStatus.BAD_REQUEST) from exc
@@ -1339,11 +1340,12 @@ class ChatHandler(BaseHTTPRequestHandler):
                 assistant_text = f"Generated image:\n\n![Generated image]({image_url})"
                 assistant_id = add_message_returning_id(
                     conn,
-                    conversation_id,
+                    branch_conversation_id,
                     Message("assistant", assistant_text),
                 )
             return {
                 "status": "ok",
+                "conversation_id": branch_conversation_id,
                 "edited_message": {
                     "id": message_id,
                     "role": "user",
@@ -1380,6 +1382,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             if existing_row["role"] != "user":
                 raise ApiError("Only user messages can be edited")
 
+            original_title = get_conversation_title(conn, conversation_id) or "Chat"
             history_rows = get_all_messages_with_ids(conn, conversation_id)
             history_rows = [row for row in history_rows if row["id"] < message_id]
             history = build_replay_history_from_rows(
@@ -1398,12 +1401,17 @@ class ChatHandler(BaseHTTPRequestHandler):
             messages = [Message("system", system_prompt), *history, user_message]
 
             try:
-                replace_message_from_id(conn, conversation_id, message_id, user_message)
+                branch_conversation_id = create_conversation(conn, f"{original_title} (branch)")
+                for row in history_rows:
+                    add_message_returning_id(conn, branch_conversation_id, message_from_row(row))
+                edited_user_message_id = add_message_returning_id(
+                    conn, branch_conversation_id, user_message
+                )
                 auto_extract_memory_suggestions_from_user_text(
                     conn,
                     content,
-                    conversation_id=conversation_id,
-                    source_message_id=message_id,
+                    conversation_id=branch_conversation_id,
+                    source_message_id=edited_user_message_id,
                 )
                 response_text = call_openai(
                     messages,
@@ -1427,7 +1435,7 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             inspected_attachment_message_ids = infer_inspected_attachment_message_ids(
                 history_rows,
-                current_user_message_id=message_id,
+                current_user_message_id=edited_user_message_id,
                 current_user_message=user_message,
                 tools_used=response_text.tools_used,
                 response_text=response_text.text,
@@ -1435,7 +1443,7 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             assistant_id = add_message_returning_id(
                 conn,
-                conversation_id,
+                branch_conversation_id,
                 Message(
                     "assistant",
                     response_text.text,
@@ -1449,8 +1457,9 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         return {
             "status": "ok",
+            "conversation_id": branch_conversation_id,
             "edited_message": {
-                "id": message_id,
+                "id": edited_user_message_id,
                 "role": "user",
                 "content": summarize_content(user_message.content),
             },

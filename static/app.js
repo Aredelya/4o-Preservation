@@ -3320,11 +3320,20 @@ const sendMessage = async () => {
       pendingBubble.classList.remove("error");
     }
 
+    const targetConversationId =
+      isEditing && result?.conversation_id ? result.conversation_id : conversationId;
+    if (isEditing && result?.conversation_id) {
+      state.activeConversation = result.conversation_id;
+    }
     setEditingState(null);
     await loadConversations({ refreshMessages: false });
-    await loadMessages(conversationId);
+    await loadMessages(targetConversationId);
     await loadMemories();
-    setStatus(isEditing ? "Message updated and response regenerated." : "", "", isEditing ? 2500 : 0);
+    if (isEditing && result?.conversation_id) {
+      setStatus("Created a branched conversation from your edit.", "", 2500);
+    } else {
+      setStatus(isEditing ? "Message updated and response regenerated." : "", "", isEditing ? 2500 : 0);
+    }
   } catch (error) {
     if (error?.name === "AbortError") {
       if (pendingBubble) {
