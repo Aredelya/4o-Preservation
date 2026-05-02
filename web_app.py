@@ -1395,6 +1395,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             return {
                 "status": "ok",
                 "conversation_id": target_conversation_id,
+                "branched": bool(enable_edit_branching and target_conversation_id != conversation_id),
                 "edited_message": {
                     "id": message_id,
                     "role": "user",
@@ -1515,6 +1516,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         return {
             "status": "ok",
             "conversation_id": target_conversation_id,
+            "branched": bool(enable_edit_branching and target_conversation_id != conversation_id),
             "edited_message": {
                 "id": edited_user_message_id,
                 "role": "user",
