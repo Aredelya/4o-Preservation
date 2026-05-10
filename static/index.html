@@ -224,7 +224,15 @@
         </button>
        </div>
 
-        <div class="row">
+        <section class="library-section" aria-label="Assistant-created library">
+          <div class="library-heading">
+            <h3>Library</h3>
+            <button id="refreshLibrary" type="button" class="secondary">Refresh</button>
+          </div>
+          <div id="libraryList" class="library-list" aria-live="polite"></div>
+        </section>
+
+        <div class="row memory-add-row">
           <input
             type="text"
             id="memoryInput"
@@ -257,6 +265,78 @@
         <div id="memorySuggestions" class="list memory-suggestions" aria-live="polite"></div>
         <div class="list" id="memoryList" aria-live="polite"></div>
         <button id="clearMemories" type="button">Clear memories</button>
+
+        <section class="scheduled-task-section" aria-label="Scheduled tasks">
+          <button
+            id="scheduledTaskToggle"
+            type="button"
+            class="scheduled-task-toggle"
+            aria-expanded="false"
+            aria-controls="scheduledTaskContent"
+          >
+            <span>Scheduled tasks</span>
+            <span id="scheduledTaskToggleLabel">Show</span>
+          </button>
+
+          <div id="scheduledTaskContent" class="scheduled-task-content" hidden>
+            <div class="row">
+              <input
+                type="text"
+                id="scheduledTaskName"
+                placeholder="Task name..."
+                aria-label="Scheduled task name"
+                autocomplete="off"
+              />
+            </div>
+
+            <div class="row">
+              <textarea
+                id="scheduledTaskPrompt"
+                placeholder="What should the assistant do when this runs?"
+                aria-label="Scheduled task prompt"
+              ></textarea>
+            </div>
+
+            <div class="row scheduled-task-controls">
+              <input type="datetime-local" id="scheduledTaskRunAt" aria-label="Scheduled run time" />
+              <select id="scheduledTaskType" aria-label="Schedule recurrence">
+                <option value="once">One time</option>
+                <option value="daily">Every day</option>
+                <option value="weekly">Every week</option>
+              </select>
+              <select id="scheduledTaskTargetMode" aria-label="Scheduled task target">
+                <option value="new">New chat each run</option>
+                <option value="conversation">Current chat</option>
+              </select>
+            </div>
+
+            <div class="row scheduled-task-options">
+              <label class="search-toggle memory-pin-toggle">
+                <input type="checkbox" id="scheduledTaskEnabled" checked />
+                Enabled
+              </label>
+              <label class="search-toggle memory-pin-toggle">
+                <input type="checkbox" id="scheduledTaskWebSearch" checked />
+                Web search
+              </label>
+              <label class="search-toggle memory-pin-toggle">
+                <input type="checkbox" id="scheduledTaskCodeInterpreter" checked />
+                Code interpreter
+              </label>
+            </div>
+
+            <div class="scheduled-task-note">
+              Tasks save the current model and reasoning settings from the composer.
+            </div>
+
+            <div class="row scheduled-task-actions">
+              <button class="primary" id="saveScheduledTask" type="button">Save task</button>
+              <button id="cancelScheduledTask" type="button" hidden disabled>Cancel edit</button>
+            </div>
+
+            <div id="scheduledTaskList" class="list" aria-live="polite"></div>
+          </div>
+        </section>
       </section>
     </main>
 

@@ -4,9 +4,13 @@
   activeFolderId: null,
   activeConversation: null,
   memories: [],
+  scheduledTasks: [],
   memorySuggestions: [],
+  libraryItems: [],
   editingSuggestionId: null,
   editingSuggestionDraft: null,
+  editingScheduledTaskId: null,
+  scheduledTaskConversationId: null,
   settings: null,
   searchQuery: "",
   isSending: false,
@@ -55,6 +59,22 @@ const saveMemoryBtn = document.getElementById("saveMemory");
 const memorySuggestionsList = document.getElementById("memorySuggestions");
 const memoryList = document.getElementById("memoryList");
 const clearMemoriesBtn = document.getElementById("clearMemories");
+const libraryList = document.getElementById("libraryList");
+const refreshLibraryBtn = document.getElementById("refreshLibrary");
+const scheduledTaskNameInput = document.getElementById("scheduledTaskName");
+const scheduledTaskPromptInput = document.getElementById("scheduledTaskPrompt");
+const scheduledTaskRunAtInput = document.getElementById("scheduledTaskRunAt");
+const scheduledTaskTypeInput = document.getElementById("scheduledTaskType");
+const scheduledTaskTargetModeInput = document.getElementById("scheduledTaskTargetMode");
+const scheduledTaskEnabledInput = document.getElementById("scheduledTaskEnabled");
+const scheduledTaskWebSearchInput = document.getElementById("scheduledTaskWebSearch");
+const scheduledTaskCodeInterpreterInput = document.getElementById("scheduledTaskCodeInterpreter");
+const saveScheduledTaskBtn = document.getElementById("saveScheduledTask");
+const cancelScheduledTaskBtn = document.getElementById("cancelScheduledTask");
+const scheduledTaskList = document.getElementById("scheduledTaskList");
+const scheduledTaskToggleBtn = document.getElementById("scheduledTaskToggle");
+const scheduledTaskToggleLabel = document.getElementById("scheduledTaskToggleLabel");
+const scheduledTaskContent = document.getElementById("scheduledTaskContent");
 const conversationSearchInput = document.getElementById("conversationSearch");
 const clearConversationSearchBtn = document.getElementById("clearConversationSearch");
 const createFolderBtn = document.getElementById("createFolderBtn");
@@ -69,6 +89,21 @@ const cancelResponseBtn = document.getElementById("cancelResponseBtn");
 const MODEL_STORAGE_KEY = "chat-model-selection";
 const REASONING_ENABLED_STORAGE_KEY = "chat-reasoning-enabled";
 const REASONING_EFFORT_STORAGE_KEY = "chat-reasoning-effort";
+const SCHEDULED_TASKS_OPEN_STORAGE_KEY = "scheduled-tasks-open";
+
+const setScheduledTaskSectionOpen = (open) => {
+  const isOpen = !!open;
+  if (scheduledTaskContent) {
+    scheduledTaskContent.hidden = !isOpen;
+  }
+  if (scheduledTaskToggleBtn) {
+    scheduledTaskToggleBtn.setAttribute("aria-expanded", isOpen ? "true" : "false");
+  }
+  if (scheduledTaskToggleLabel) {
+    scheduledTaskToggleLabel.textContent = isOpen ? "Hide" : "Show";
+  }
+  window.localStorage.setItem(SCHEDULED_TASKS_OPEN_STORAGE_KEY, isOpen ? "1" : "0");
+};
 
 const setEditingState = (messageId = null) => {
   state.editingMessageId = messageId;
@@ -2448,11 +2483,85 @@ const getRenderedMessageContent = (message) => {
   return cleaned || "(Attachment)";
 };
 
+const normalizeMessageImagePreviews = (message) => {
+  if (!message || message.role !== "assistant" || !Array.isArray(message.image_previews)) {
+    return [];
+  }
+
+  const normalized = [];
+  const seen = new Set();
+
+  for (const rawPreview of message.image_previews) {
+    if (!rawPreview || typeof rawPreview !== "object") continue;
+
+    const imageUrl = String(rawPreview.image_url || "").trim();
+    const sourceUrl = String(rawPreview.source_url || "").trim();
+    if (!/^https?:\/\//i.test(imageUrl) || !/^https?:\/\//i.test(sourceUrl) || seen.has(imageUrl)) {
+      continue;
+    }
+
+    seen.add(imageUrl);
+    normalized.push({
+      image_url: imageUrl,
+      source_url: sourceUrl,
+      title: String(rawPreview.title || rawPreview.source_label || "Web image").trim() || "Web image",
+      source_label: String(rawPreview.source_label || "").trim(),
+    });
+  }
+
+  return normalized;
+};
+
+const createImagePreviewStrip = (message) => {
+  const previews = normalizeMessageImagePreviews(message);
+  if (!previews.length) return null;
+
+  const wrap = document.createElement("div");
+  wrap.className = "message-image-previews";
+
+  for (const preview of previews) {
+    const link = document.createElement("a");
+    link.className = "message-image-preview-card";
+    link.href = preview.source_url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.title = preview.title;
+
+    const img = document.createElement("img");
+    img.className = "message-image-preview-img";
+    img.src = preview.image_url;
+    img.alt = preview.title;
+    img.loading = "lazy";
+    link.appendChild(img);
+
+    const label = document.createElement("div");
+    label.className = "message-image-preview-label";
+    label.textContent = preview.title;
+    link.appendChild(label);
+
+    if (preview.source_label) {
+      const source = document.createElement("div");
+      source.className = "message-image-preview-source";
+      source.textContent = preview.source_label;
+      link.appendChild(source);
+    }
+
+    wrap.appendChild(link);
+  }
+
+  return wrap;
+};
+
 const createMessageElement = (message) => {
   ensureFileSearchStatusStyles();
 
   const wrap = document.createElement("div");
   wrap.className = `message-row ${message.role}`;
+
+  const imagePreviewStrip = createImagePreviewStrip(message);
+  if (imagePreviewStrip) {
+    wrap.appendChild(imagePreviewStrip);
+  }
 
   const bubble = createBubble({
     role: message.role,
@@ -2617,6 +2726,27 @@ const renderConversations = () => {
     };
     const folderActions = document.createElement("div");
     folderActions.className = "list-item-actions";
+    const renameFolderBtn = document.createElement("button");
+    renameFolderBtn.className = "conversation-pin";
+    renameFolderBtn.type = "button";
+    renameFolderBtn.textContent = "✎";
+    renameFolderBtn.title = "Rename folder";
+    renameFolderBtn.setAttribute("aria-label", "Rename folder");
+    renameFolderBtn.onclick = async () => {
+      const name = window.prompt("Rename folder:", folder.name || "");
+      if (name == null) return;
+      const trimmedName = name.trim();
+      if (!trimmedName) {
+        setStatus("Folder name required.", "error");
+        return;
+      }
+      await api(`/api/folders/${encodeURIComponent(folder.id)}/rename`, {
+        method: "POST",
+        body: JSON.stringify({ name: trimmedName }),
+      });
+      setStatus("Folder renamed.", "", 2000);
+      await loadConversations({ refreshMessages: false });
+    };
     const deleteFolderBtn = document.createElement("button");
     deleteFolderBtn.className = "danger";
     deleteFolderBtn.type = "button";
@@ -2629,6 +2759,7 @@ const renderConversations = () => {
       await loadConversations({ refreshMessages: false });
     };
     folderActions.appendChild(pinFolder);
+    folderActions.appendChild(renameFolderBtn);
     folderActions.appendChild(deleteFolderBtn);
     folderRow.appendChild(folderLabel);
     folderRow.appendChild(folderActions);
@@ -2779,6 +2910,270 @@ const renderMemories = () => {
   }
 };
 
+const padDateTimePart = (value) => String(value).padStart(2, "0");
+
+const toLocalDateTimeInputValue = (isoString) => {
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) return "";
+  return `${date.getFullYear()}-${padDateTimePart(date.getMonth() + 1)}-${padDateTimePart(date.getDate())}T${padDateTimePart(date.getHours())}:${padDateTimePart(date.getMinutes())}`;
+};
+
+const formatScheduledTaskTime = (isoString) => {
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) return "Unknown time";
+  return date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+};
+
+const getDefaultScheduledTaskRunAtValue = () => {
+  const date = new Date(Date.now() + 60 * 60 * 1000);
+  date.setSeconds(0, 0);
+  return toLocalDateTimeInputValue(date.toISOString());
+};
+
+const resetScheduledTaskForm = () => {
+  state.editingScheduledTaskId = null;
+  state.scheduledTaskConversationId = null;
+  if (scheduledTaskNameInput) scheduledTaskNameInput.value = "";
+  if (scheduledTaskPromptInput) scheduledTaskPromptInput.value = "";
+  if (scheduledTaskRunAtInput) scheduledTaskRunAtInput.value = getDefaultScheduledTaskRunAtValue();
+  if (scheduledTaskTypeInput) scheduledTaskTypeInput.value = "once";
+  if (scheduledTaskTargetModeInput) scheduledTaskTargetModeInput.value = "new";
+  if (scheduledTaskEnabledInput) scheduledTaskEnabledInput.checked = true;
+  if (scheduledTaskWebSearchInput) {
+    scheduledTaskWebSearchInput.checked = !!enableWebSearchInput?.checked;
+  }
+  if (scheduledTaskCodeInterpreterInput) {
+    scheduledTaskCodeInterpreterInput.checked = !!enableCodeInterpreterInput?.checked;
+  }
+  if (saveScheduledTaskBtn) saveScheduledTaskBtn.textContent = "Save task";
+  if (cancelScheduledTaskBtn) {
+    cancelScheduledTaskBtn.hidden = true;
+    cancelScheduledTaskBtn.disabled = true;
+  }
+};
+
+const buildScheduledTaskPayload = () => {
+  const name = (scheduledTaskNameInput?.value || "").trim();
+  const prompt = (scheduledTaskPromptInput?.value || "").trim();
+  const nextRunRaw = scheduledTaskRunAtInput?.value || "";
+  const scheduleType = scheduledTaskTypeInput?.value || "once";
+  const targetMode = scheduledTaskTargetModeInput?.value || "new";
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const chatOptions = getSelectedChatOptions();
+
+  if (!name) throw new Error("Task name required");
+  if (!prompt) throw new Error("Task prompt required");
+  if (!nextRunRaw) throw new Error("Run time required");
+  const nextRunDate = new Date(nextRunRaw);
+  if (Number.isNaN(nextRunDate.getTime())) {
+    throw new Error("Run time is invalid");
+  }
+
+  let conversationId = null;
+  if (targetMode === "conversation") {
+    conversationId = state.scheduledTaskConversationId || state.activeConversation;
+    if (!conversationId) {
+      throw new Error("Open a conversation before saving a task that targets the current chat");
+    }
+  }
+
+  return {
+    name,
+    prompt,
+    next_run_at: nextRunDate.toISOString(),
+    schedule_type: scheduleType,
+    target_mode: targetMode,
+    conversation_id: conversationId,
+    timezone,
+    enabled: !!scheduledTaskEnabledInput?.checked,
+    enable_web_search: !!scheduledTaskWebSearchInput?.checked,
+    enable_code_interpreter: !!scheduledTaskCodeInterpreterInput?.checked,
+    model: chatOptions.model,
+    enable_reasoning: chatOptions.enable_reasoning,
+    reasoning_effort: chatOptions.reasoning_effort,
+  };
+};
+
+const renderScheduledTasks = () => {
+  if (!scheduledTaskList) return;
+  scheduledTaskList.innerHTML = "";
+
+  if (!state.scheduledTasks.length) {
+    const empty = document.createElement("div");
+    empty.className = "memory-item";
+    empty.textContent = "No scheduled tasks yet.";
+    scheduledTaskList.appendChild(empty);
+    return;
+  }
+
+  for (const task of state.scheduledTasks) {
+    const card = document.createElement("div");
+    card.className = "memory-item";
+
+    const title = document.createElement("div");
+    title.textContent = task.name || "Scheduled task";
+
+    const prompt = document.createElement("div");
+    prompt.textContent = task.prompt || "";
+
+    const tags = document.createElement("div");
+    tags.className = "memory-tags";
+    const taskStatus = task.last_error ? "Failed" : task.enabled ? "Enabled" : "Paused";
+    const tagValues = [
+      task.schedule_type === "once" ? "One time" : task.schedule_type === "daily" ? "Daily" : "Weekly",
+      `Next: ${formatScheduledTaskTime(task.next_run_at)}`,
+      task.target_mode === "conversation" ? `Chat: ${task.conversation_title || task.conversation_id || "Saved chat"}` : "New chat",
+      taskStatus,
+    ];
+    for (const value of tagValues) {
+      const tag = document.createElement("span");
+      tag.className = "memory-tag";
+      tag.textContent = value;
+      tags.appendChild(tag);
+    }
+
+    const meta = document.createElement("div");
+    meta.className = "muted";
+    if (task.last_error) {
+      meta.textContent = `Last error: ${task.last_error}`;
+    } else if (task.last_run_at) {
+      meta.textContent = `Last run: ${formatScheduledTaskTime(task.last_run_at)}`;
+    } else {
+      meta.textContent = `Time zone: ${task.timezone || "UTC"}`;
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "memory-actions";
+
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.textContent = "Edit";
+    edit.onclick = () => {
+      state.editingScheduledTaskId = task.id;
+      state.scheduledTaskConversationId = task.conversation_id || null;
+      if (scheduledTaskNameInput) scheduledTaskNameInput.value = task.name || "";
+      if (scheduledTaskPromptInput) scheduledTaskPromptInput.value = task.prompt || "";
+      if (scheduledTaskRunAtInput) scheduledTaskRunAtInput.value = toLocalDateTimeInputValue(task.next_run_at);
+      if (scheduledTaskTypeInput) scheduledTaskTypeInput.value = task.schedule_type || "once";
+      if (scheduledTaskTargetModeInput) scheduledTaskTargetModeInput.value = task.target_mode || "new";
+      if (scheduledTaskEnabledInput) scheduledTaskEnabledInput.checked = !!task.enabled;
+      if (scheduledTaskWebSearchInput) scheduledTaskWebSearchInput.checked = !!task.enable_web_search;
+      if (scheduledTaskCodeInterpreterInput) scheduledTaskCodeInterpreterInput.checked = !!task.enable_code_interpreter;
+      if (saveScheduledTaskBtn) saveScheduledTaskBtn.textContent = "Update task";
+      if (cancelScheduledTaskBtn) {
+        cancelScheduledTaskBtn.hidden = false;
+        cancelScheduledTaskBtn.disabled = false;
+      }
+      setScheduledTaskSectionOpen(true);
+      scheduledTaskNameInput?.focus();
+    };
+
+    const runNow = document.createElement("button");
+    runNow.type = "button";
+    runNow.textContent = task.running ? "Running..." : "Run now";
+    runNow.disabled = !!task.running;
+    runNow.onclick = async () => {
+      try {
+        const result = await api(`/api/scheduled-tasks/${encodeURIComponent(task.id)}/run`, { method: "POST" });
+        await loadScheduledTasks();
+        await loadConversations({ refreshMessages: false });
+        if (result?.conversation_id) {
+          await selectConversation(result.conversation_id);
+        }
+        setStatus("Scheduled task ran.", "", 2000);
+      } catch (error) {
+        setStatus(`Failed to run task: ${error.message}`, "error");
+      }
+    };
+
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.textContent = task.enabled ? "Pause" : "Resume";
+    toggle.onclick = async () => {
+      try {
+        await api(`/api/scheduled-tasks/${encodeURIComponent(task.id)}/toggle`, {
+          method: "POST",
+          body: JSON.stringify({ enabled: !task.enabled }),
+        });
+        await loadScheduledTasks();
+      } catch (error) {
+        setStatus(`Failed to update task: ${error.message}`, "error");
+      }
+    };
+
+    const openLast = document.createElement("button");
+    openLast.type = "button";
+    openLast.textContent = "Open";
+    openLast.disabled = !task.last_conversation_id;
+    openLast.onclick = () => {
+      if (task.last_conversation_id) {
+        void selectConversation(task.last_conversation_id);
+      }
+    };
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "Delete";
+    remove.onclick = async () => {
+      if (!confirm(`Delete scheduled task "${task.name}"?`)) return;
+      try {
+        await api(`/api/scheduled-tasks/${encodeURIComponent(task.id)}`, { method: "DELETE" });
+        if (state.editingScheduledTaskId === task.id) {
+          resetScheduledTaskForm();
+        }
+        await loadScheduledTasks();
+        setStatus("Scheduled task deleted.", "", 2000);
+      } catch (error) {
+        setStatus(`Failed to delete task: ${error.message}`, "error");
+      }
+    };
+
+    actions.appendChild(edit);
+    actions.appendChild(runNow);
+    actions.appendChild(toggle);
+    actions.appendChild(openLast);
+    actions.appendChild(remove);
+
+    card.appendChild(title);
+    card.appendChild(prompt);
+    card.appendChild(tags);
+    card.appendChild(meta);
+    card.appendChild(actions);
+    scheduledTaskList.appendChild(card);
+  }
+};
+
+const getScheduledTaskExecutionFingerprint = (task) =>
+  [
+    task?.last_run_at || "",
+    task?.last_error || "",
+    task?.last_conversation_id || "",
+    task?.running ? "1" : "0",
+  ].join("|");
+
+const loadScheduledTasks = async ({ refreshConversationsOnExecution = true } = {}) => {
+  const previousExecutionState = new Map(
+    state.scheduledTasks.map((task) => [task.id, getScheduledTaskExecutionFingerprint(task)]),
+  );
+  const data = await api("/api/scheduled-tasks");
+  state.scheduledTasks = data.tasks || [];
+  renderScheduledTasks();
+
+  if (!refreshConversationsOnExecution || previousExecutionState.size === 0) {
+    return;
+  }
+
+  const shouldRefreshConversations = state.scheduledTasks.some((task) => {
+    const previousFingerprint = previousExecutionState.get(task.id);
+    if (previousFingerprint === undefined) return false;
+    return previousFingerprint !== getScheduledTaskExecutionFingerprint(task);
+  });
+
+  if (shouldRefreshConversations) {
+    await loadConversations({ refreshMessages: false });
+  }
+};
+
 const scrollMessagesToBottom = () => {
   messageList.scrollTop = messageList.scrollHeight;
   const lastBubble = messageList.lastElementChild;
@@ -2832,6 +3227,7 @@ const loadMessages = async (conversationId, options = {}) => {
 
   renderMessages(data.messages, autoSnap);
   scheduleFileSearchStatusPoll(conversationId, data.messages);
+  void loadLibrary().catch((error) => console.error("Failed to refresh library:", error));
 
   if (!quietFileSearchRefresh) {
     const hasProcessingStatus = Array.isArray(data.messages) && data.messages.some((message) => {
@@ -2842,6 +3238,133 @@ const loadMessages = async (conversationId, options = {}) => {
       setStatus("File search indexing is still running...", "", 1800);
     }
   }
+};
+
+const formatLibraryTime = (isoString = "") => {
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) return isoString || "";
+  return date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+};
+
+const guessImageExtension = (url = "") => {
+  const cleanUrl = String(url || "").split("?")[0].split("#")[0];
+  const match = cleanUrl.match(/\.(png|jpe?g|webp|gif)$/i);
+  if (match) return match[1].toLowerCase().replace("jpeg", "jpg");
+  if (String(url).startsWith("data:image/")) {
+    const dataMatch = String(url).match(/^data:image\/([a-zA-Z0-9.+-]+);/);
+    return (dataMatch?.[1] || "png").replace("jpeg", "jpg");
+  }
+  return "png";
+};
+
+const renderLibrary = () => {
+  if (!libraryList) return;
+  libraryList.innerHTML = "";
+
+  const items = Array.isArray(state.libraryItems) ? state.libraryItems : [];
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "library-empty muted";
+    empty.textContent = "Generated images and files will appear here.";
+    libraryList.appendChild(empty);
+    return;
+  }
+
+  for (const item of items) {
+    const artifactUrl = item.local_url || item.url;
+    const card = document.createElement("div");
+    card.className = `library-item ${item.kind === "image" ? "image" : "file"}${item.archived ? " archived" : ""}`;
+
+    const preview = document.createElement("button");
+    preview.type = "button";
+    preview.className = "library-preview";
+
+    if (item.kind === "image") {
+      const image = document.createElement("img");
+      image.src = artifactUrl;
+      image.alt = item.label || "Generated image";
+      preview.title = "Open image preview";
+      preview.onclick = () => openAttachmentLightbox(artifactUrl, item.label || "Generated image");
+      preview.appendChild(image);
+    } else {
+      preview.textContent = "FILE";
+      preview.title = item.label || "Generated file";
+      preview.onclick = () => {
+        window.open(artifactUrl, "_blank", "noopener,noreferrer");
+      };
+    }
+
+    const body = document.createElement("div");
+    body.className = "library-body";
+
+    const title = document.createElement("div");
+    title.className = "library-title";
+    title.textContent = item.label || (item.kind === "image" ? "Generated image" : "Generated file");
+
+    const meta = document.createElement("div");
+    meta.className = "library-meta";
+    const conversationTitleText = item.conversation_title || "Untitled conversation";
+    const createdAt = formatLibraryTime(item.created_at || "");
+    const archiveText = item.archived ? "saved locally" : "linked";
+    meta.textContent = [conversationTitleText, createdAt, archiveText].filter(Boolean).join(" · ");
+
+    const actions = document.createElement("div");
+    actions.className = "library-actions";
+
+    const open = document.createElement("button");
+    open.type = "button";
+    open.textContent = item.kind === "image" ? "View" : "Open";
+    open.onclick = () => {
+      if (item.kind === "image") {
+        openAttachmentLightbox(artifactUrl, item.label || "Generated image");
+      } else {
+        window.open(artifactUrl, "_blank", "noopener,noreferrer");
+      }
+    };
+
+    const download = document.createElement("button");
+    download.type = "button";
+    download.textContent = "Download";
+    download.onclick = async () => {
+      try {
+        if (item.kind === "image") {
+          const baseName = item.message_id ? `library-image-${item.message_id}` : "generated-image";
+          await downloadImageFromSrc(artifactUrl, `${baseName}.${guessImageExtension(artifactUrl)}`);
+        } else {
+          triggerBrowserDownload(artifactUrl, item.filename || item.label || "generated-file");
+        }
+        setStatus("Download started.", "", 1800);
+      } catch (error) {
+        setStatus(`Failed to download library item: ${error.message}`, "error");
+      }
+    };
+
+    const jump = document.createElement("button");
+    jump.type = "button";
+    jump.textContent = "Chat";
+    jump.disabled = !item.conversation_id;
+    jump.onclick = () => {
+      if (item.conversation_id) {
+        void selectConversation(item.conversation_id);
+      }
+    };
+
+    actions.appendChild(open);
+    actions.appendChild(download);
+    actions.appendChild(jump);
+    body.appendChild(title);
+    body.appendChild(meta);
+    body.appendChild(actions);
+    card.appendChild(preview);
+    card.appendChild(body);
+    libraryList.appendChild(card);
+  }
+};
+
+const loadLibrary = async () => {
+  const data = await api("/api/library");
+  state.libraryItems = data.items || [];
+  renderLibrary();
 };
 
 const renderMemorySuggestions = () => {
@@ -3555,6 +4078,8 @@ const deleteConversation = async (id) => {
 const initializeApp = async () => {
   clearFileSearchStatusPoll();
   ensureChatSearchUI();
+  resetScheduledTaskForm();
+  setScheduledTaskSectionOpen(getStoredBoolean(SCHEDULED_TASKS_OPEN_STORAGE_KEY, false));
 
   try {
     await loadSettings();
@@ -3568,6 +4093,20 @@ const initializeApp = async () => {
   } catch (error) {
     console.error("Failed to load memories:", error);
     setStatus(`Failed to load memories: ${error.message}`, "error");
+  }
+
+  try {
+    await loadLibrary();
+  } catch (error) {
+    console.error("Failed to load library:", error);
+    setStatus(`Failed to load library: ${error.message}`, "error");
+  }
+
+  try {
+    await loadScheduledTasks();
+  } catch (error) {
+    console.error("Failed to load scheduled tasks:", error);
+    setStatus(`Failed to load scheduled tasks: ${error.message}`, "error");
   }
 
   try {
@@ -3628,6 +4167,66 @@ clearMemoriesBtn.onclick = () => {
   if (!confirm("Clear all saved memories?")) return;
   void clearMemories();
 };
+
+if (refreshLibraryBtn) {
+  refreshLibraryBtn.onclick = async () => {
+    try {
+      await loadLibrary();
+      setStatus("Library refreshed.", "", 1600);
+    } catch (error) {
+      setStatus(`Failed to refresh library: ${error.message}`, "error");
+    }
+  };
+}
+
+if (saveScheduledTaskBtn) {
+  saveScheduledTaskBtn.onclick = async () => {
+    try {
+      const payload = buildScheduledTaskPayload();
+      if (state.editingScheduledTaskId) {
+        await api(`/api/scheduled-tasks/${encodeURIComponent(state.editingScheduledTaskId)}`, {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        setStatus("Scheduled task updated.", "", 2000);
+      } else {
+        await api("/api/scheduled-tasks", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        setStatus("Scheduled task created.", "", 2000);
+      }
+      resetScheduledTaskForm();
+      setScheduledTaskSectionOpen(true);
+      await loadScheduledTasks();
+    } catch (error) {
+      setStatus(`Failed to save scheduled task: ${error.message}`, "error");
+    }
+  };
+}
+
+if (cancelScheduledTaskBtn) {
+  cancelScheduledTaskBtn.onclick = () => {
+    resetScheduledTaskForm();
+  };
+}
+
+if (scheduledTaskToggleBtn) {
+  scheduledTaskToggleBtn.onclick = () => {
+    const isOpen = scheduledTaskToggleBtn.getAttribute("aria-expanded") === "true";
+    setScheduledTaskSectionOpen(!isOpen);
+  };
+}
+
+if (scheduledTaskTargetModeInput) {
+  scheduledTaskTargetModeInput.addEventListener("change", () => {
+    if (scheduledTaskTargetModeInput.value !== "conversation") {
+      state.scheduledTaskConversationId = null;
+    } else if (!state.scheduledTaskConversationId) {
+      state.scheduledTaskConversationId = state.activeConversation;
+    }
+  });
+}
 
 if (historyToggleBtn) {
   historyToggleBtn.onclick = () => {
@@ -3788,6 +4387,9 @@ updateConversationActionState();
 updateCancelResponseButton();
 updateImageCommandHint();
 updateComposerContext();
+window.setInterval(() => {
+  void loadScheduledTasks().catch(() => {});
+}, 15000);
 window.addEventListener("load", scheduleMessageBottomSnap);
 
 /* --- Mobile drawer polish: memories drawer + backdrop + mutual exclusion --- */
