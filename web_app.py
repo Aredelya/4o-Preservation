@@ -9,12 +9,15 @@ import secrets
 import time
 import shlex
 import re
+import threading
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
+from urllib import request as urlrequest
 
 from core import (
     AVAILABLE_CHAT_MODELS,
@@ -73,9 +76,19 @@ from core import (
     update_conversation_pinned,
     update_conversation_title,
     create_conversation_folder,
+    create_scheduled_task,
     assign_conversation_to_folder,
+    delete_scheduled_task,
+    update_folder_name,
     update_folder_pinned,
     delete_conversation_folder,
+    finish_scheduled_task_run,
+    get_scheduled_task,
+    list_due_scheduled_task_ids,
+    list_scheduled_tasks,
+    update_scheduled_task,
+    update_scheduled_task_enabled,
+    claim_scheduled_task_run,
 )
 
 load_env_file(ENV_PATH)
@@ -85,6 +98,9 @@ PORT = int(os.environ.get("CHATBOT_WEB_PORT", "8000"))
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
+LIBRARY_DIR = BASE_DIR / "library"
+LIBRARY_MANIFEST_PATH = LIBRARY_DIR / "manifest.json"
+LIBRARY_LOCK = threading.Lock()
 
 MAX_BODY_SIZE = 30 * 1024 * 1024
 MAX_ATTACHMENTS = 8
@@ -127,6 +143,500 @@ IMAGE_COMMAND_ALLOWED_BACKGROUNDS = {
     "opaque",
     "auto",
 }
+
+SCHEDULED_TASK_ALLOWED_TYPES = {"once", "daily", "weekly"}
+SCHEDULED_TASK_ALLOWED_TARGET_MODES = {"new", "conversation"}
+SCHEDULED_TASK_POLL_SECONDS = 20
+SCHEDULED_TASK_FAILURE_BACKOFF_MINUTES = 30
+MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+MAX_LIBRARY_ARTIFACT_BYTES = 50 * 1024 * 1024
+
+
+def _parse_iso_datetime_utc(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value).strip())
+    except ValueError as exc:
+        raise ApiError("Invalid scheduled task time") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _compute_followup_run(next_run_at: str, schedule_type: str) -> Optional[str]:
+    if schedule_type == "once":
+        return None
+    current = _parse_iso_datetime_utc(next_run_at)
+    interval = timedelta(days=1 if schedule_type == "daily" else 7)
+    now_utc = datetime.now(timezone.utc)
+    while current <= now_utc:
+        current += interval
+    return current.isoformat()
+
+
+def _build_assistant_metadata(
+    response_text,
+    chat_options: dict,
+    inspected_attachment_message_ids: Optional[list[int]] = None,
+) -> dict:
+    metadata = {
+        "tools_used": response_text.tools_used,
+        "activity_log": response_text.activity_log,
+        "model": response_text.model,
+        "requested_model": chat_options.get("requested_model") or response_text.model,
+        "reasoning_enabled": bool(chat_options.get("reasoning_enabled")),
+        "reasoning_effort": response_text.reasoning_effort,
+        "requested_reasoning_effort": chat_options.get("requested_reasoning_effort"),
+        "image_previews": list(response_text.image_previews or []),
+    }
+    if inspected_attachment_message_ids:
+        metadata["inspected_attachment_message_ids"] = [
+            int(message_id)
+            for message_id in inspected_attachment_message_ids
+            if int(message_id) > 0
+        ]
+    return metadata
+
+
+def extract_assistant_library_items(content: str) -> list[dict]:
+    items: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    for match in MARKDOWN_IMAGE_RE.finditer(content or ""):
+        label = (match.group(1) or "Generated image").strip() or "Generated image"
+        url = (match.group(2) or "").strip()
+        if not url or not (url.startswith("http://") or url.startswith("https://") or url.startswith("data:image/")):
+            continue
+        key = ("image", url)
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(
+            {
+                "kind": "image",
+                "label": label,
+                "url": url,
+                "filename": "",
+            }
+        )
+
+    for match in MARKDOWN_LINK_RE.finditer(content or ""):
+        label = (match.group(1) or "Generated file").strip() or "Generated file"
+        url = (match.group(2) or "").strip()
+        if not url.startswith("/api/container-files/"):
+            continue
+        key = ("file", url)
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(
+            {
+                "kind": "file",
+                "label": label,
+                "url": url,
+                "filename": label,
+            }
+        )
+
+    return items
+
+
+def _safe_library_filename(value: str, fallback: str = "artifact") -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "").strip())
+    cleaned = cleaned.strip(" .-_")
+    return cleaned[:160] or fallback
+
+
+def _library_extension(filename: str, mime_type: str, source_url: str = "") -> str:
+    candidates = [
+        os.path.splitext(filename or "")[1],
+        os.path.splitext(urlparse(source_url or "").path)[1],
+        mimetypes.guess_extension(mime_type or ""),
+    ]
+    for candidate in candidates:
+        ext = str(candidate or "").strip().lower()
+        if not ext:
+            continue
+        if ext == ".jpe":
+            ext = ".jpg"
+        if re.fullmatch(r"\.[a-z0-9]{1,8}", ext):
+            return ext
+    return ".bin"
+
+
+def _read_library_manifest_unlocked() -> dict:
+    if not LIBRARY_MANIFEST_PATH.exists():
+        return {"items": []}
+    try:
+        parsed = json.loads(LIBRARY_MANIFEST_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"items": []}
+    if not isinstance(parsed, dict):
+        return {"items": []}
+    items = parsed.get("items")
+    if not isinstance(items, list):
+        parsed["items"] = []
+    return parsed
+
+
+def _write_library_manifest_unlocked(manifest: dict) -> None:
+    LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_path = LIBRARY_MANIFEST_PATH.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp_path.replace(LIBRARY_MANIFEST_PATH)
+
+
+def _library_source_key(item: dict, payload: Optional[bytes] = None) -> str:
+    url = str(item.get("url") or "").strip()
+    if payload is not None:
+        return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+    if url.startswith("data:image/"):
+        try:
+            _mime_type, encoded = parse_data_url(url)
+            return f"sha256:{hashlib.sha256(base64.b64decode(encoded)).hexdigest()}"
+        except Exception:
+            return f"data:{hashlib.sha256(url.encode('utf-8')).hexdigest()}"
+    return url
+
+
+def _store_library_artifact(
+    *,
+    source_key: str,
+    source_url: str,
+    kind: str,
+    label: str,
+    filename: str,
+    mime_type: str,
+    payload: bytes,
+    conversation_id: str = "",
+    message_id: Optional[int] = None,
+) -> dict:
+    if not payload:
+        raise ValueError("Library artifact payload is empty")
+    if len(payload) > MAX_LIBRARY_ARTIFACT_BYTES:
+        raise ValueError("Library artifact is too large")
+
+    safe_kind = "image" if kind == "image" else "file"
+    safe_filename = _safe_library_filename(filename or label or safe_kind)
+    ext = _library_extension(safe_filename, mime_type, source_url)
+    blob_id = hashlib.sha256(payload).hexdigest()
+    relpath = Path(blob_id[:2]) / f"{blob_id}{ext}"
+
+    with LIBRARY_LOCK:
+        manifest = _read_library_manifest_unlocked()
+        for existing in manifest.get("items", []):
+            if isinstance(existing, dict) and existing.get("source_key") == source_key:
+                return existing
+
+        LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
+        full_path = (LIBRARY_DIR / relpath).resolve()
+        library_root = LIBRARY_DIR.resolve()
+        if library_root not in full_path.parents:
+            raise ValueError("Library path escapes storage root")
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        if not full_path.exists():
+            full_path.write_bytes(payload)
+
+        record = {
+            "source_key": source_key,
+            "source_url": source_url,
+            "kind": safe_kind,
+            "label": label or safe_filename,
+            "filename": safe_filename,
+            "mime_type": mime_type or "application/octet-stream",
+            "byte_size": len(payload),
+            "storage_relpath": str(relpath).replace("\\", "/"),
+            "conversation_id": conversation_id or "",
+            "message_id": int(message_id) if message_id else None,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        manifest.setdefault("items", []).append(record)
+        _write_library_manifest_unlocked(manifest)
+        return record
+
+
+def _fetch_remote_image_payload(url: str) -> tuple[bytes, str]:
+    req = urlrequest.Request(
+        url,
+        method="GET",
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; 4o-Preservation/1.0)",
+            "Accept": "image/*,*/*;q=0.8",
+        },
+    )
+    with urlrequest.urlopen(req, timeout=30) as response:
+        content_type = str(response.headers.get("Content-Type") or "application/octet-stream").split(";", 1)[0]
+        payload = response.read(MAX_LIBRARY_ARTIFACT_BYTES + 1)
+    if len(payload) > MAX_LIBRARY_ARTIFACT_BYTES:
+        raise ValueError("Remote image is too large")
+    if not content_type.startswith("image/"):
+        guessed = mimetypes.guess_type(urlparse(url).path)[0] or ""
+        if not guessed.startswith("image/"):
+            raise ValueError("Remote URL did not return an image")
+        content_type = guessed
+    return payload, content_type
+
+
+def _archive_library_item(
+    item: dict,
+    *,
+    conversation_id: str = "",
+    message_id: Optional[int] = None,
+) -> Optional[dict]:
+    kind = str(item.get("kind") or "").strip()
+    url = str(item.get("url") or "").strip()
+    label = str(item.get("label") or "").strip() or ("Generated image" if kind == "image" else "Generated file")
+    filename = str(item.get("filename") or "").strip() or label
+
+    if kind == "image" and url.startswith("data:image/"):
+        mime_type, encoded = parse_data_url(url)
+        payload = base64.b64decode(encoded)
+    elif kind == "image" and (url.startswith("http://") or url.startswith("https://")):
+        payload, mime_type = _fetch_remote_image_payload(url)
+    elif kind == "file" and url.startswith("/api/container-files/"):
+        parts = [unquote(part) for part in urlparse(url).path.split("/") if part]
+        if len(parts) < 4:
+            raise ValueError("Invalid generated file URL")
+        payload, mime_type = fetch_container_file_content(parts[2], parts[3])
+        if len(parts) >= 5:
+            filename = parts[4] or filename
+    else:
+        return None
+
+    source_key = _library_source_key(item, payload)
+    return _store_library_artifact(
+        source_key=source_key,
+        source_url=url,
+        kind=kind,
+        label=label,
+        filename=filename,
+        mime_type=mime_type,
+        payload=payload,
+        conversation_id=conversation_id,
+        message_id=message_id,
+    )
+
+
+def archive_assistant_library_items(
+    content: str,
+    *,
+    conversation_id: str = "",
+    message_id: Optional[int] = None,
+) -> list[dict]:
+    archived: list[dict] = []
+    for item in extract_assistant_library_items(content):
+        try:
+            record = _archive_library_item(
+                item,
+                conversation_id=conversation_id,
+                message_id=message_id,
+            )
+            if record:
+                archived.append(record)
+        except Exception:
+            logger.exception("Failed to archive assistant library item")
+    return archived
+
+
+def _library_records_by_source_key() -> dict[str, dict]:
+    with LIBRARY_LOCK:
+        manifest = _read_library_manifest_unlocked()
+    records: dict[str, dict] = {}
+    for record in manifest.get("items", []):
+        if not isinstance(record, dict):
+            continue
+        source_key = str(record.get("source_key") or "").strip()
+        relpath = str(record.get("storage_relpath") or "").strip()
+        if source_key and relpath:
+            records[source_key] = record
+    return records
+
+
+def _library_local_url(record: dict) -> str:
+    relpath = str(record.get("storage_relpath") or "").strip().replace("\\", "/")
+    if not relpath:
+        return ""
+    return f"/library-files/{relpath}"
+
+
+def _run_scheduled_task(task_id: str) -> dict:
+    with connect_db() as conn:
+        task = get_scheduled_task(conn, task_id)
+        if task is None:
+            raise RuntimeError("Scheduled task not found")
+
+        prompt = str(task["prompt"] or "").strip()
+        if not prompt:
+            raise RuntimeError("Scheduled task prompt is empty")
+
+        target_mode = str(task["target_mode"] or "new").strip().lower()
+        if target_mode not in SCHEDULED_TASK_ALLOWED_TARGET_MODES:
+            target_mode = "new"
+
+        title = str(task["name"] or "Scheduled task").strip() or "Scheduled task"
+        conversation_id = str(task["conversation_id"] or "").strip() or None
+
+        if target_mode == "conversation" and conversation_id and conversation_exists(conn, conversation_id):
+            target_conversation_id = conversation_id
+        else:
+            target_conversation_id = create_conversation(conn, title)
+            if target_mode == "conversation":
+                conn.execute(
+                    "UPDATE scheduled_tasks SET conversation_id = ?, updated_at = ? WHERE id = ?",
+                    (target_conversation_id, datetime.now(timezone.utc).isoformat(), task_id),
+                )
+                conn.commit()
+
+        user_message = Message("user", build_user_content(prompt, [], [], []))
+        history_rows = (
+            get_recent_message_rows_with_ids(conn, target_conversation_id)
+            if target_mode == "conversation"
+            else []
+        )
+        history = build_replay_history_from_rows(
+            history_rows,
+            query=prompt,
+            current_user_message=user_message,
+        )
+        chat_options = resolve_chat_settings(
+            task["model"],
+            enable_reasoning=bool(task["enable_reasoning"]),
+            reasoning_effort=task["reasoning_effort"],
+            prompt_text=prompt,
+            attachment_count=0,
+        )
+        system_prompt = build_system_prompt(
+            conn,
+            prompt,
+            conversation_id=target_conversation_id,
+            current_user_message=user_message,
+        )
+        messages = [Message("system", system_prompt), *history, user_message]
+
+        response_text = call_openai(
+            messages,
+            web_search_mode="auto" if bool(task["enable_web_search"]) else "off",
+            enable_code_interpreter=bool(task["enable_code_interpreter"]),
+            model=chat_options["model"],
+            reasoning_effort=chat_options["reasoning_effort"],
+        )
+        user_message_id = add_message_returning_id(conn, target_conversation_id, user_message)
+        auto_extract_memory_suggestions_from_user_text(
+            conn,
+            prompt,
+            conversation_id=target_conversation_id,
+            source_message_id=user_message_id,
+        )
+        inspected_attachment_message_ids = infer_inspected_attachment_message_ids(
+            history_rows,
+            current_user_message_id=user_message_id,
+            current_user_message=user_message,
+            tools_used=response_text.tools_used,
+            response_text=response_text.text,
+        )
+        assistant_id = add_message_returning_id(
+            conn,
+            target_conversation_id,
+            Message(
+                "assistant",
+                response_text.text,
+                _build_assistant_metadata(
+                    response_text,
+                    chat_options,
+                    inspected_attachment_message_ids,
+                ),
+            ),
+        )
+        archive_assistant_library_items(
+            response_text.text,
+            conversation_id=target_conversation_id,
+            message_id=assistant_id,
+        )
+        return {
+            "conversation_id": target_conversation_id,
+            "user_message_id": user_message_id,
+            "assistant_message_id": assistant_id,
+        }
+
+
+class ScheduledTaskScheduler:
+    def __init__(self) -> None:
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run_loop,
+            name="scheduled-task-runner",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._thread.join(timeout=5)
+
+    def _run_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                self.run_due_tasks()
+            except Exception:
+                logger.exception("Scheduled task poll failed")
+            if self._stop_event.wait(SCHEDULED_TASK_POLL_SECONDS):
+                break
+
+    def run_due_tasks(self) -> None:
+        with connect_db() as conn:
+            due_task_ids = list_due_scheduled_task_ids(conn, datetime.now(timezone.utc).isoformat())
+
+        for task_id in due_task_ids:
+            self.run_task(task_id)
+
+    def run_task(self, task_id: str, *, raise_on_error: bool = False) -> Optional[dict]:
+        with connect_db() as conn:
+            if not claim_scheduled_task_run(conn, task_id):
+                return None
+            task = get_scheduled_task(conn, task_id)
+
+        if task is None:
+            return None
+
+        try:
+            result = _run_scheduled_task(task_id)
+        except Exception as exc:
+            logger.exception("Scheduled task %s failed", task_id)
+            failed_at = datetime.now(timezone.utc)
+            is_once = str(task["schedule_type"] or "once").strip().lower() == "once"
+            retry_at = None
+            if not is_once:
+                retry_at = (failed_at + timedelta(minutes=SCHEDULED_TASK_FAILURE_BACKOFF_MINUTES)).isoformat()
+            with connect_db() as conn:
+                finish_scheduled_task_run(
+                    conn,
+                    task_id,
+                    next_run_at=retry_at or failed_at.isoformat(),
+                    enabled=bool(task["enabled"]) and not is_once,
+                    last_run_at=failed_at.isoformat(),
+                    last_error=str(exc),
+                    last_conversation_id=str(task["last_conversation_id"] or "") or None,
+                )
+            if raise_on_error:
+                raise
+            return None
+
+        next_run_at = _compute_followup_run(str(task["next_run_at"]), str(task["schedule_type"]))
+        enabled = bool(task["enabled"]) and str(task["schedule_type"]) != "once"
+        completed_at = datetime.now(timezone.utc).isoformat()
+        with connect_db() as conn:
+            finish_scheduled_task_run(
+                conn,
+                task_id,
+                next_run_at=next_run_at or completed_at,
+                enabled=enabled,
+                last_run_at=completed_at,
+                last_error=None,
+                last_conversation_id=result["conversation_id"],
+            )
+        return result
 
 IMAGE_COMMAND_ALLOWED_OUTPUT_FORMATS = {
     "png",
@@ -320,7 +830,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; "
-            "img-src 'self' data:; "
+            "img-src 'self' data: https: http:; "
             "style-src 'self' 'unsafe-inline'; "
             "script-src 'self' 'unsafe-inline'; "
             "base-uri 'none'; "
@@ -570,6 +1080,191 @@ class ChatHandler(BaseHTTPRequestHandler):
             folders = list_conversation_folders(conn)
         return {"conversations": conversations, "folders": folders}
 
+    def _serialize_scheduled_task(self, task: dict) -> dict:
+        return {
+            "id": task["id"],
+            "name": task["name"],
+            "prompt": task["prompt"],
+            "schedule_type": task["schedule_type"],
+            "next_run_at": task["next_run_at"],
+            "timezone": task.get("timezone") or "UTC",
+            "target_mode": task["target_mode"],
+            "conversation_id": task["conversation_id"],
+            "conversation_title": task.get("conversation_title"),
+            "enabled": bool(task["enabled"]),
+            "running": bool(task["running"]),
+            "last_run_at": task["last_run_at"],
+            "last_error": task["last_error"],
+            "last_conversation_id": task["last_conversation_id"],
+            "last_conversation_title": task.get("last_conversation_title"),
+            "model": task["model"],
+            "enable_reasoning": bool(task.get("enable_reasoning")),
+            "reasoning_effort": task["reasoning_effort"],
+            "enable_web_search": bool(task["enable_web_search"]),
+            "enable_code_interpreter": bool(task["enable_code_interpreter"]),
+            "created_at": task["created_at"],
+            "updated_at": task["updated_at"],
+        }
+
+    def _list_scheduled_tasks(self) -> dict:
+        with connect_db() as conn:
+            tasks = [self._serialize_scheduled_task(task) for task in list_scheduled_tasks(conn)]
+        return {"tasks": tasks}
+
+    def _parse_scheduled_task_payload(self, payload: dict) -> dict:
+        name = str(payload.get("name") or "").strip()
+        prompt = str(payload.get("prompt") or "").strip()
+        schedule_type = str(payload.get("schedule_type") or "once").strip().lower()
+        target_mode = str(payload.get("target_mode") or "new").strip().lower()
+        timezone_name = str(payload.get("timezone") or "UTC").strip() or "UTC"
+        conversation_id = str(payload.get("conversation_id") or "").strip() or None
+        enabled = bool(payload.get("enabled", True))
+
+        if not name:
+            raise ApiError("Task name required")
+        if not prompt:
+            raise ApiError("Task prompt required")
+        if schedule_type not in SCHEDULED_TASK_ALLOWED_TYPES:
+            raise ApiError("Invalid schedule type")
+        if target_mode not in SCHEDULED_TASK_ALLOWED_TARGET_MODES:
+            raise ApiError("Invalid target mode")
+
+        next_run_at = _parse_iso_datetime_utc(payload.get("next_run_at") or "").isoformat()
+        chat_options = self._resolve_chat_options(
+            payload,
+            prompt_text=prompt,
+            attachment_count=0,
+        )
+
+        return {
+            "name": name,
+            "prompt": prompt,
+            "schedule_type": schedule_type,
+            "next_run_at": next_run_at,
+            "timezone_name": timezone_name,
+            "target_mode": target_mode,
+            "conversation_id": conversation_id,
+            "enabled": enabled,
+            "model": chat_options["requested_model"] or chat_options["model"],
+            "enable_reasoning": bool(chat_options["reasoning_enabled"]),
+            "reasoning_effort": chat_options["requested_reasoning_effort"],
+            "enable_web_search": bool(payload.get("enable_web_search", True)),
+            "enable_code_interpreter": bool(payload.get("enable_code_interpreter", True)),
+        }
+
+    def _handle_create_scheduled_task(self, payload: dict) -> dict:
+        task = self._parse_scheduled_task_payload(payload)
+        with connect_db() as conn:
+            task_id = create_scheduled_task(
+                conn,
+                name=task["name"],
+                prompt=task["prompt"],
+                schedule_type=task["schedule_type"],
+                next_run_at=task["next_run_at"],
+                timezone_name=task["timezone_name"],
+                target_mode=task["target_mode"],
+                conversation_id=task["conversation_id"],
+                model=task["model"],
+                enable_reasoning=task["enable_reasoning"],
+                reasoning_effort=task["reasoning_effort"],
+                enable_web_search=task["enable_web_search"],
+                enable_code_interpreter=task["enable_code_interpreter"],
+            )
+        return {"id": task_id}
+
+    def _handle_update_scheduled_task(self, task_id: str, payload: dict) -> dict:
+        task = self._parse_scheduled_task_payload(payload)
+        with connect_db() as conn:
+            updated = update_scheduled_task(
+                conn,
+                task_id,
+                name=task["name"],
+                prompt=task["prompt"],
+                schedule_type=task["schedule_type"],
+                next_run_at=task["next_run_at"],
+                timezone_name=task["timezone_name"],
+                target_mode=task["target_mode"],
+                conversation_id=task["conversation_id"],
+                enabled=task["enabled"],
+                model=task["model"],
+                enable_reasoning=task["enable_reasoning"],
+                reasoning_effort=task["reasoning_effort"],
+                enable_web_search=task["enable_web_search"],
+                enable_code_interpreter=task["enable_code_interpreter"],
+            )
+        return {"updated": updated}
+
+    def _handle_toggle_scheduled_task(self, task_id: str, payload: dict) -> dict:
+        enabled = bool(payload.get("enabled", True))
+        with connect_db() as conn:
+            updated = update_scheduled_task_enabled(conn, task_id, enabled)
+        return {"updated": updated, "enabled": enabled}
+
+    def _handle_run_scheduled_task(self, task_id: str) -> dict:
+        try:
+            result = SCHEDULED_TASK_SCHEDULER.run_task(task_id, raise_on_error=True)
+        except Exception as exc:
+            raise ApiError(str(exc), HTTPStatus.BAD_GATEWAY) from exc
+        if result is None:
+            raise ApiError("Scheduled task is already running", HTTPStatus.CONFLICT)
+        return {"status": "ok", "conversation_id": result["conversation_id"]}
+
+    def _list_library_items(self) -> dict:
+        items: list[dict] = []
+        archived_records = _library_records_by_source_key()
+
+        with connect_db() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    m.id AS message_id,
+                    m.conversation_id,
+                    m.content,
+                    m.created_at,
+                    c.title AS conversation_title
+                FROM messages m
+                JOIN conversations c ON c.id = m.conversation_id
+                WHERE m.role = 'assistant'
+                ORDER BY m.created_at DESC, m.id DESC
+                """
+            ).fetchall()
+
+        seen: set[tuple[str, str]] = set()
+        for row in rows:
+            for item in extract_assistant_library_items(str(row["content"] or "")):
+                key = (str(item.get("kind") or ""), str(item.get("url") or ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                archived = archived_records.get(_library_source_key(item))
+                if not archived and str(item.get("url") or "").startswith("data:image/"):
+                    try:
+                        archived = _archive_library_item(
+                            item,
+                            conversation_id=str(row["conversation_id"] or ""),
+                            message_id=int(row["message_id"]),
+                        )
+                        if archived:
+                            archived_records[str(archived.get("source_key") or "")] = archived
+                    except Exception:
+                        logger.exception("Failed to lazily archive library image")
+                local_url = _library_local_url(archived) if archived else ""
+                items.append(
+                    {
+                        **item,
+                        "local_url": local_url,
+                        "archived": bool(local_url),
+                        "byte_size": int(archived.get("byte_size") or 0) if archived else 0,
+                        "mime_type": str(archived.get("mime_type") or "") if archived else "",
+                        "message_id": row["message_id"],
+                        "conversation_id": row["conversation_id"],
+                        "conversation_title": row["conversation_title"] or "Untitled conversation",
+                        "created_at": row["created_at"],
+                    }
+                )
+
+        return {"items": items}
+
     def _handle_create_folder(self, payload: dict) -> dict:
         name = str(payload.get("name") or "").strip()
         if not name:
@@ -583,6 +1278,14 @@ class ChatHandler(BaseHTTPRequestHandler):
         with connect_db() as conn:
             updated = update_folder_pinned(conn, folder_id, pinned)
         return {"updated": updated, "pinned": pinned}
+
+    def _handle_rename_folder(self, folder_id: str, payload: dict) -> dict:
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            raise ApiError("Folder name required")
+        with connect_db() as conn:
+            updated = update_folder_name(conn, folder_id, name)
+        return {"updated": updated, "name": name}
 
     def _handle_add_conversation_to_folder(self, folder_id: str, payload: dict) -> dict:
         conversation_id = str(payload.get("conversation_id") or "").strip()
@@ -651,6 +1354,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                         "requested_reasoning_effort": str(
                             metadata.get("requested_reasoning_effort") or ""
                         ).strip(),
+                        "image_previews": list(metadata.get("image_previews") or []),
                         "has_inspectable_attachments": has_inspectable_attachments,
                         "attachments": extract_message_attachment_cards(message.content),
                         "attachment_status": attachment_status,
@@ -838,6 +1542,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             "reasoning_enabled": bool(chat_options.get("reasoning_enabled")),
             "reasoning_effort": response_text.reasoning_effort,
             "requested_reasoning_effort": chat_options.get("requested_reasoning_effort"),
+            "image_previews": list(response_text.image_previews or []),
         }
         if inspected_attachment_message_ids:
             metadata["inspected_attachment_message_ids"] = [
@@ -846,6 +1551,25 @@ class ChatHandler(BaseHTTPRequestHandler):
                 if int(message_id) > 0
             ]
         return metadata
+
+    def _add_assistant_message_returning_id(
+        self,
+        conn,
+        conversation_id: str,
+        content: str,
+        metadata: Optional[dict] = None,
+    ) -> int:
+        message_id = add_message_returning_id(
+            conn,
+            conversation_id,
+            Message("assistant", content, metadata),
+        )
+        archive_assistant_library_items(
+            content,
+            conversation_id=conversation_id,
+            message_id=message_id,
+        )
+        return message_id
 
     def _handle_create_conversation(self) -> dict:
         with connect_db() as conn:
@@ -1039,10 +1763,15 @@ class ChatHandler(BaseHTTPRequestHandler):
                         "Image generation failed", HTTPStatus.INTERNAL_SERVER_ERROR
                     ) from exc
                 assistant_text = f"Generated image:\n\n![Generated image]({image_url})"
-                add_message(conn, conversation_id, Message("assistant", assistant_text))
+                assistant_id = self._add_assistant_message_returning_id(
+                    conn,
+                    conversation_id,
+                    assistant_text,
+                )
             return {
                 "status": "ok",
                 "assistant_message": {
+                    "id": assistant_id,
                     "role": "assistant",
                     "content": assistant_text,
                 },
@@ -1112,23 +1841,21 @@ class ChatHandler(BaseHTTPRequestHandler):
                 response_text=response_text.text,
             )
 
-            add_message(
+            assistant_id = self._add_assistant_message_returning_id(
                 conn,
                 conversation_id,
-                Message(
-                    "assistant",
-                    response_text.text,
-                    self._assistant_metadata(
-                        response_text,
-                        chat_options,
-                        inspected_attachment_message_ids,
-                    ),
+                response_text.text,
+                self._assistant_metadata(
+                    response_text,
+                    chat_options,
+                    inspected_attachment_message_ids,
                 ),
             )
 
         return {
             "status": "ok",
             "assistant_message": {
+                "id": assistant_id,
                 "role": "assistant",
                 "content": response_text.text,
                 "tools_used": response_text.tools_used,
@@ -1138,6 +1865,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 "reasoning_enabled": chat_options["reasoning_enabled"],
                 "reasoning_effort": response_text.reasoning_effort,
                 "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
+                "image_previews": list(response_text.image_previews or []),
             },
         }
 
@@ -1217,28 +1945,27 @@ class ChatHandler(BaseHTTPRequestHandler):
                         tools_used=response_text.tools_used,
                         response_text=response_text.text,
                     )
-                    add_message(
+                    assistant_id = self._add_assistant_message_returning_id(
                         conn,
                         conversation_id,
-                        Message(
-                            "assistant",
-                            response_text.text,
-                            {
-                                "tools_used": response_text.tools_used,
-                                "activity_log": response_text.activity_log,
-                                "model": response_text.model,
-                                "requested_model": chat_options["requested_model"],
-                                "reasoning_enabled": chat_options["reasoning_enabled"],
-                                "reasoning_effort": response_text.reasoning_effort,
-                                "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
-                                "inspected_attachment_message_ids": inspected_attachment_message_ids,
-                            },
-                        ),
+                        response_text.text,
+                        {
+                            "tools_used": response_text.tools_used,
+                            "activity_log": response_text.activity_log,
+                            "model": response_text.model,
+                            "requested_model": chat_options["requested_model"],
+                            "reasoning_enabled": chat_options["reasoning_enabled"],
+                            "reasoning_effort": response_text.reasoning_effort,
+                            "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
+                            "image_previews": list(response_text.image_previews or []),
+                            "inspected_attachment_message_ids": inspected_attachment_message_ids,
+                        },
                     )
                     self._send_sse_event(
                         {
                             "type": "done",
                             "assistant_message": {
+                                "id": assistant_id,
                                 "role": "assistant",
                                 "content": response_text.text,
                                 "tools_used": response_text.tools_used,
@@ -1248,6 +1975,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                                 "reasoning_enabled": chat_options["reasoning_enabled"],
                                 "reasoning_effort": response_text.reasoning_effort,
                                 "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
+                                "image_previews": list(response_text.image_previews or []),
                             },
                         }
                     )
@@ -1291,6 +2019,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                         response_reasoning_effort = str(
                             event.get("reasoning_effort") or chat_options["reasoning_effort"] or ""
                         ).strip() or None
+                        image_previews = list(event.get("image_previews") or [])
                         inspected_attachment_message_ids = infer_inspected_attachment_message_ids(
                             history_rows,
                             current_user_message_id=user_message_id,
@@ -1298,28 +2027,27 @@ class ChatHandler(BaseHTTPRequestHandler):
                             tools_used=tools_used,
                             response_text=final_text,
                         )
-                        add_message(
+                        assistant_id = self._add_assistant_message_returning_id(
                             conn,
                             conversation_id,
-                            Message(
-                                "assistant",
-                                final_text,
-                                {
-                                    "tools_used": tools_used,
-                                    "activity_log": activity_log,
-                                    "model": resolved_model,
-                                    "requested_model": chat_options["requested_model"],
-                                    "reasoning_enabled": chat_options["reasoning_enabled"],
-                                    "reasoning_effort": response_reasoning_effort,
-                                    "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
-                                    "inspected_attachment_message_ids": inspected_attachment_message_ids,
-                                },
-                            ),
+                            final_text,
+                            {
+                                "tools_used": tools_used,
+                                "activity_log": activity_log,
+                                "model": resolved_model,
+                                "requested_model": chat_options["requested_model"],
+                                "reasoning_enabled": chat_options["reasoning_enabled"],
+                                "reasoning_effort": response_reasoning_effort,
+                                "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
+                                "image_previews": image_previews,
+                                "inspected_attachment_message_ids": inspected_attachment_message_ids,
+                            },
                         )
                         self._send_sse_event(
                             {
                                 "type": "done",
                                 "assistant_message": {
+                                    "id": assistant_id,
                                     "role": "assistant",
                                     "content": final_text,
                                     "tools_used": tools_used,
@@ -1329,6 +2057,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                                     "reasoning_enabled": chat_options["reasoning_enabled"],
                                     "reasoning_effort": response_reasoning_effort,
                                     "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
+                                    "image_previews": image_previews,
                                 },
                             }
                         )
@@ -1387,10 +2116,10 @@ class ChatHandler(BaseHTTPRequestHandler):
                         "Image generation failed", HTTPStatus.INTERNAL_SERVER_ERROR
                     ) from exc
                 assistant_text = f"Generated image:\n\n![Generated image]({image_url})"
-                assistant_id = add_message_returning_id(
+                assistant_id = self._add_assistant_message_returning_id(
                     conn,
                     target_conversation_id,
-                    Message("assistant", assistant_text),
+                    assistant_text,
                 )
             return {
                 "status": "ok",
@@ -1499,17 +2228,14 @@ class ChatHandler(BaseHTTPRequestHandler):
                 response_text=response_text.text,
             )
 
-            assistant_id = add_message_returning_id(
+            assistant_id = self._add_assistant_message_returning_id(
                 conn,
                 target_conversation_id,
-                Message(
-                    "assistant",
-                    response_text.text,
-                    self._assistant_metadata(
-                        response_text,
-                        chat_options,
-                        inspected_attachment_message_ids,
-                    ),
+                response_text.text,
+                self._assistant_metadata(
+                    response_text,
+                    chat_options,
+                    inspected_attachment_message_ids,
                 ),
             )
 
@@ -1533,6 +2259,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 "reasoning_enabled": chat_options["reasoning_enabled"],
                 "reasoning_effort": response_text.reasoning_effort,
                 "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
+                "image_previews": list(response_text.image_previews or []),
             },
         }
 
@@ -1598,10 +2325,10 @@ class ChatHandler(BaseHTTPRequestHandler):
                 cleanup_orphaned_attachments(conn)
 
                 assistant_text = f"Generated image:\n\n![Generated image]({image_url})"
-                assistant_id = add_message_returning_id(
+                assistant_id = self._add_assistant_message_returning_id(
                     conn,
                     conversation_id,
-                    Message("assistant", assistant_text),
+                    assistant_text,
                 )
                 return {
                     "status": "ok",
@@ -1678,17 +2405,14 @@ class ChatHandler(BaseHTTPRequestHandler):
             delete_memory_suggestions_from_message_id(conn, conversation_id, message_id, include_current=True)
             cleanup_orphaned_attachments(conn)
 
-            assistant_id = add_message_returning_id(
+            assistant_id = self._add_assistant_message_returning_id(
                 conn,
                 conversation_id,
-                Message(
-                    "assistant",
-                    response_text.text,
-                    self._assistant_metadata(
-                        response_text,
-                        chat_options,
-                        inspected_attachment_message_ids,
-                    ),
+                response_text.text,
+                self._assistant_metadata(
+                    response_text,
+                    chat_options,
+                    inspected_attachment_message_ids,
                 ),
             )
 
@@ -1705,6 +2429,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 "reasoning_enabled": chat_options["reasoning_enabled"],
                 "reasoning_effort": response_text.reasoning_effort,
                 "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
+                "image_previews": list(response_text.image_previews or []),
             },
             "source_user_message": {
                 "id": user_row["id"],
@@ -1815,17 +2540,14 @@ class ChatHandler(BaseHTTPRequestHandler):
                     delete_memory_suggestions_from_message_id(conn, conversation_id, message_id, include_current=True)
                     cleanup_orphaned_attachments(conn)
 
-                    assistant_id = add_message_returning_id(
+                    assistant_id = self._add_assistant_message_returning_id(
                         conn,
                         conversation_id,
-                        Message(
-                            "assistant",
-                            response_text.text,
-                            self._assistant_metadata(
-                                response_text,
-                                chat_options,
-                                inspected_attachment_message_ids,
-                            ),
+                        response_text.text,
+                        self._assistant_metadata(
+                            response_text,
+                            chat_options,
+                            inspected_attachment_message_ids,
                         ),
                     )
 
@@ -1843,6 +2565,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                                 "reasoning_enabled": chat_options["reasoning_enabled"],
                                 "reasoning_effort": response_text.reasoning_effort,
                                 "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
+                                "image_previews": list(response_text.image_previews or []),
                             },
                             "source_user_message": {
                                 "id": user_row["id"],
@@ -1899,6 +2622,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                         response_reasoning_effort = str(
                             event.get("reasoning_effort") or chat_options["reasoning_effort"] or ""
                         ).strip() or None
+                        image_previews = list(event.get("image_previews") or [])
                         inspected_attachment_message_ids = infer_inspected_attachment_message_ids(
                             history_rows,
                             current_user_message_id=int(user_row["id"]),
@@ -1914,23 +2638,21 @@ class ChatHandler(BaseHTTPRequestHandler):
                         delete_memory_suggestions_from_message_id(conn, conversation_id, message_id, include_current=True)
                         cleanup_orphaned_attachments(conn)
 
-                        assistant_id = add_message_returning_id(
+                        assistant_id = self._add_assistant_message_returning_id(
                             conn,
                             conversation_id,
-                            Message(
-                                "assistant",
-                                final_text,
-                                {
-                                    "tools_used": tools_used,
-                                    "activity_log": activity_log,
-                                    "model": resolved_model,
-                                    "requested_model": chat_options["requested_model"],
-                                    "reasoning_enabled": chat_options["reasoning_enabled"],
-                                    "reasoning_effort": response_reasoning_effort,
-                                    "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
-                                    "inspected_attachment_message_ids": inspected_attachment_message_ids,
-                                },
-                            ),
+                            final_text,
+                            {
+                                "tools_used": tools_used,
+                                "activity_log": activity_log,
+                                "model": resolved_model,
+                                "requested_model": chat_options["requested_model"],
+                                "reasoning_enabled": chat_options["reasoning_enabled"],
+                                "reasoning_effort": response_reasoning_effort,
+                                "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
+                                "image_previews": image_previews,
+                                "inspected_attachment_message_ids": inspected_attachment_message_ids,
+                            },
                         )
 
                         self._send_sse_event(
@@ -1947,6 +2669,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                                     "reasoning_enabled": chat_options["reasoning_enabled"],
                                     "reasoning_effort": response_reasoning_effort,
                                     "requested_reasoning_effort": chat_options["requested_reasoning_effort"],
+                                    "image_previews": image_previews,
                                 },
                                 "source_user_message": {
                                     "id": user_row["id"],
@@ -1992,6 +2715,21 @@ class ChatHandler(BaseHTTPRequestHandler):
             clear_memories(conn)
         return {"status": "ok"}
 
+    def _handle_library_file_download(self, storage_parts: list[str]) -> None:
+        if not storage_parts:
+            raise ApiError("Missing library file path", HTTPStatus.BAD_REQUEST)
+
+        relative_path = Path(*[unquote(part) for part in storage_parts])
+        library_root = LIBRARY_DIR.resolve()
+        full_path = (library_root / relative_path).resolve()
+
+        if library_root not in full_path.parents and full_path != library_root:
+            raise ApiError("Not found", HTTPStatus.NOT_FOUND)
+        if not full_path.exists() or not full_path.is_file():
+            raise ApiError("Not found", HTTPStatus.NOT_FOUND)
+
+        self._send_file(full_path)
+
     def _handle_container_file_download(
         self,
         container_id: str,
@@ -2015,6 +2753,20 @@ class ChatHandler(BaseHTTPRequestHandler):
                 safe_container_id,
             )
             raise ApiError("Unable to download generated file", HTTPStatus.BAD_GATEWAY) from exc
+
+        source_url = f"/api/container-files/{safe_container_id}/{safe_file_id}/{safe_filename}"
+        try:
+            _store_library_artifact(
+                source_key=source_url,
+                source_url=source_url,
+                kind="file",
+                label=safe_filename,
+                filename=safe_filename,
+                mime_type=content_type,
+                payload=payload,
+            )
+        except Exception:
+            logger.exception("Failed to archive downloaded generated file")
 
         self._send_bytes(
             payload,
@@ -2076,6 +2828,10 @@ class ChatHandler(BaseHTTPRequestHandler):
                 self._send_file(file_path)
                 return
 
+            if len(parts) >= 2 and parts[0] == "library-files":
+                self._handle_library_file_download(parts[1:])
+                return
+
             if parts == ["api", "conversations"]:
                 params = parse_qs(parsed.query)
                 query = (params.get("q", [""])[0] or "").strip()
@@ -2084,6 +2840,13 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             if parts == ["api", "settings"]:
                 self._send_json(self._get_client_settings())
+                return
+            if parts == ["api", "scheduled-tasks"]:
+                self._send_json(self._list_scheduled_tasks())
+                return
+
+            if parts == ["api", "library"]:
+                self._send_json(self._list_library_items())
                 return
             
             if len(parts) == 4 and parts[:2] == ["api", "conversations"] and parts[3] == "export":
@@ -2156,6 +2919,10 @@ class ChatHandler(BaseHTTPRequestHandler):
                 payload = self._read_json()
                 self._send_json(self._handle_create_folder(payload), HTTPStatus.CREATED)
                 return
+            if parts == ["api", "scheduled-tasks"]:
+                payload = self._read_json()
+                self._send_json(self._handle_create_scheduled_task(payload), HTTPStatus.CREATED)
+                return
 
             if len(parts) == 4 and parts[:2] == ["api", "conversations"] and parts[3] == "pin":
                 payload = self._read_json()
@@ -2165,9 +2932,24 @@ class ChatHandler(BaseHTTPRequestHandler):
                 payload = self._read_json()
                 self._send_json(self._handle_pin_folder(parts[2], payload))
                 return
+            if len(parts) == 4 and parts[:2] == ["api", "folders"] and parts[3] == "rename":
+                payload = self._read_json()
+                self._send_json(self._handle_rename_folder(parts[2], payload))
+                return
             if len(parts) == 4 and parts[:2] == ["api", "folders"] and parts[3] == "conversations":
                 payload = self._read_json()
                 self._send_json(self._handle_add_conversation_to_folder(parts[2], payload))
+                return
+            if len(parts) == 3 and parts[:2] == ["api", "scheduled-tasks"]:
+                payload = self._read_json()
+                self._send_json(self._handle_update_scheduled_task(parts[2], payload))
+                return
+            if len(parts) == 4 and parts[:2] == ["api", "scheduled-tasks"] and parts[3] == "toggle":
+                payload = self._read_json()
+                self._send_json(self._handle_toggle_scheduled_task(parts[2], payload))
+                return
+            if len(parts) == 4 and parts[:2] == ["api", "scheduled-tasks"] and parts[3] == "run":
+                self._send_json(self._handle_run_scheduled_task(parts[2]))
                 return
 
             if parts == ["api", "send"]:
@@ -2243,6 +3025,11 @@ class ChatHandler(BaseHTTPRequestHandler):
             if len(parts) == 3 and parts[:2] == ["api", "folders"]:
                 self._send_json(self._handle_delete_folder(parts[2]))
                 return
+            if len(parts) == 3 and parts[:2] == ["api", "scheduled-tasks"]:
+                with connect_db() as conn:
+                    deleted = delete_scheduled_task(conn, parts[2])
+                self._send_json({"deleted": deleted})
+                return
 
             if len(parts) == 3 and parts[:2] == ["api", "memory-suggestions"]:
                 self._send_json(self._handle_delete_memory_suggestion(parts[2]))
@@ -2255,6 +3042,9 @@ class ChatHandler(BaseHTTPRequestHandler):
         except Exception:
             logger.exception("Unhandled DELETE error")
             self._send_api_error("Internal server error", HTTPStatus.INTERNAL_SERVER_ERROR)
+
+
+SCHEDULED_TASK_SCHEDULER = ScheduledTaskScheduler()
 
 
 def main() -> None:
@@ -2277,6 +3067,7 @@ def main() -> None:
         )
 
     server = ThreadingHTTPServer((HOST, PORT), ChatHandler)
+    SCHEDULED_TASK_SCHEDULER.start()
     logger.info("Web app running on http://%s:%s", HOST, PORT)
 
     try:
@@ -2284,6 +3075,7 @@ def main() -> None:
     except KeyboardInterrupt:
         logger.info("Shutting down")
     finally:
+        SCHEDULED_TASK_SCHEDULER.stop()
         server.server_close()
 
 
