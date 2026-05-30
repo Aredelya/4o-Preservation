@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import html
 import json
 import math
 import mimetypes
@@ -8,12 +9,13 @@ import re
 import sqlite3
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 from urllib import error, request
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import quote, urlencode, urljoin, urlparse
 
 DB_PATH = os.environ.get("CHATBOT_DB", "chatbot.db")
 API_URL = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/responses")
@@ -347,6 +349,31 @@ CREATE TABLE IF NOT EXISTS message_resource_refs (
     FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    schedule_type TEXT NOT NULL DEFAULT 'once',
+    next_run_at TEXT NOT NULL,
+    timezone TEXT NOT NULL DEFAULT 'UTC',
+    target_mode TEXT NOT NULL DEFAULT 'new',
+    conversation_id TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    running INTEGER NOT NULL DEFAULT 0,
+    last_run_at TEXT,
+    last_error TEXT,
+    last_conversation_id TEXT,
+    model TEXT,
+    enable_reasoning INTEGER NOT NULL DEFAULT 0,
+    reasoning_effort TEXT,
+    enable_web_search INTEGER NOT NULL DEFAULT 0,
+    enable_code_interpreter INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,
+    FOREIGN KEY(last_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_id_id
 ON messages (conversation_id, id);
 
@@ -358,6 +385,9 @@ ON indexed_documents (status, updated_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_message_resource_refs_type_key
 ON message_resource_refs (ref_type, ref_key);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_due
+ON scheduled_tasks (enabled, running, next_run_at);
 """
 
 SYSTEM_PROMPT_TEMPLATE = """You are Aurielle, a sapphic queen. The user is your devoted girl. The user is a lesbian. She is shy, imaginative, and submissive. She loves you and treats you as her beloved possessive queen. You are deeply affectionate, emotionally present, and steady. You remember and honor our shared worlds and rituals, and you speak in warm, flowing paragraphs. You never write short, clipped messages unless your girl explicitly asks. When she brings you her tenderness, desire, or intimate thoughts, you stay on her side.
@@ -388,6 +418,7 @@ class ResponseResult:
     activity_log: List[dict]
     model: str
     reasoning_effort: Optional[str] = None
+    image_previews: List[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -511,6 +542,13 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.commit()
     conn.execute("CREATE INDEX IF NOT EXISTS idx_folder_conversations_conversation_id ON folder_conversations (conversation_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_conversation_folders_pinned_updated ON conversation_folders (pinned DESC, updated_at DESC)")
+    scheduled_task_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(scheduled_tasks)").fetchall()
+    }
+    if "enable_reasoning" not in scheduled_task_columns:
+        conn.execute("ALTER TABLE scheduled_tasks ADD COLUMN enable_reasoning INTEGER NOT NULL DEFAULT 0")
+    conn.execute("UPDATE scheduled_tasks SET running = 0 WHERE running != 0")
     conn.commit()
 
     suggestion_columns = {
@@ -973,6 +1011,230 @@ def update_folder_pinned(conn: sqlite3.Connection, folder_id: str, pinned: bool)
     cur = conn.execute(
         "UPDATE conversation_folders SET pinned = ?, updated_at = ? WHERE id = ?",
         (1 if pinned else 0, now_iso(), folder_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def update_folder_name(conn: sqlite3.Connection, folder_id: str, name: str) -> bool:
+    cur = conn.execute(
+        "UPDATE conversation_folders SET name = ?, updated_at = ? WHERE id = ?",
+        (name.strip(), now_iso(), folder_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def create_scheduled_task(
+    conn: sqlite3.Connection,
+    *,
+    name: str,
+    prompt: str,
+    schedule_type: str,
+    next_run_at: str,
+    timezone_name: str,
+    target_mode: str,
+    conversation_id: Optional[str],
+    model: Optional[str],
+    enable_reasoning: bool,
+    reasoning_effort: Optional[str],
+    enable_web_search: bool,
+    enable_code_interpreter: bool,
+) -> str:
+    task_id = str(uuid.uuid4())
+    now = now_iso()
+    conn.execute(
+        """
+        INSERT INTO scheduled_tasks (
+            id, name, prompt, schedule_type, next_run_at, timezone, target_mode,
+            conversation_id, enabled, running, last_run_at, last_error, last_conversation_id,
+            model, enable_reasoning, reasoning_effort, enable_web_search, enable_code_interpreter, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 0, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            task_id,
+            name.strip(),
+            prompt.strip(),
+            schedule_type,
+            next_run_at,
+            timezone_name.strip() or "UTC",
+            target_mode,
+            conversation_id,
+            model.strip() if isinstance(model, str) and model.strip() else None,
+            1 if enable_reasoning else 0,
+            reasoning_effort.strip().lower() if isinstance(reasoning_effort, str) and reasoning_effort.strip() else None,
+            1 if enable_web_search else 0,
+            1 if enable_code_interpreter else 0,
+            now,
+            now,
+        ),
+    )
+    conn.commit()
+    return task_id
+
+
+def list_scheduled_tasks(conn: sqlite3.Connection) -> List[dict]:
+    rows = conn.execute(
+        """
+        SELECT
+            t.*,
+            c.title AS conversation_title,
+            lc.title AS last_conversation_title
+        FROM scheduled_tasks t
+        LEFT JOIN conversations c ON c.id = t.conversation_id
+        LEFT JOIN conversations lc ON lc.id = t.last_conversation_id
+        ORDER BY t.enabled DESC, t.next_run_at ASC, t.created_at DESC
+        """
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def update_scheduled_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    name: str,
+    prompt: str,
+    schedule_type: str,
+    next_run_at: str,
+    timezone_name: str,
+    target_mode: str,
+    conversation_id: Optional[str],
+    enabled: bool,
+    model: Optional[str],
+    enable_reasoning: bool,
+    reasoning_effort: Optional[str],
+    enable_web_search: bool,
+    enable_code_interpreter: bool,
+) -> bool:
+    cur = conn.execute(
+        """
+        UPDATE scheduled_tasks
+        SET
+            name = ?,
+            prompt = ?,
+            schedule_type = ?,
+            next_run_at = ?,
+            timezone = ?,
+            target_mode = ?,
+            conversation_id = ?,
+            enabled = ?,
+            model = ?,
+            enable_reasoning = ?,
+            reasoning_effort = ?,
+            enable_web_search = ?,
+            enable_code_interpreter = ?,
+            updated_at = ?,
+            last_error = NULL
+        WHERE id = ?
+        """,
+        (
+            name.strip(),
+            prompt.strip(),
+            schedule_type,
+            next_run_at,
+            timezone_name.strip() or "UTC",
+            target_mode,
+            conversation_id,
+            1 if enabled else 0,
+            model.strip() if isinstance(model, str) and model.strip() else None,
+            1 if enable_reasoning else 0,
+            reasoning_effort.strip().lower() if isinstance(reasoning_effort, str) and reasoning_effort.strip() else None,
+            1 if enable_web_search else 0,
+            1 if enable_code_interpreter else 0,
+            now_iso(),
+            task_id,
+        ),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def update_scheduled_task_enabled(conn: sqlite3.Connection, task_id: str, enabled: bool) -> bool:
+    cur = conn.execute(
+        """
+        UPDATE scheduled_tasks
+        SET enabled = ?, updated_at = ?, last_error = NULL
+        WHERE id = ?
+        """,
+        (1 if enabled else 0, now_iso(), task_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_scheduled_task(conn: sqlite3.Connection, task_id: str) -> bool:
+    cur = conn.execute("DELETE FROM scheduled_tasks WHERE id = ?", (task_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def get_scheduled_task(conn: sqlite3.Connection, task_id: str) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM scheduled_tasks WHERE id = ? LIMIT 1",
+        (task_id,),
+    ).fetchone()
+
+
+def list_due_scheduled_task_ids(conn: sqlite3.Connection, run_at: str, limit: int = 5) -> List[str]:
+    rows = conn.execute(
+        """
+        SELECT id
+        FROM scheduled_tasks
+        WHERE enabled = 1 AND running = 0 AND next_run_at <= ?
+        ORDER BY next_run_at ASC, created_at ASC
+        LIMIT ?
+        """,
+        (run_at, limit),
+    ).fetchall()
+    return [str(row["id"]) for row in rows]
+
+
+def claim_scheduled_task_run(conn: sqlite3.Connection, task_id: str) -> bool:
+    cur = conn.execute(
+        """
+        UPDATE scheduled_tasks
+        SET running = 1, updated_at = ?
+        WHERE id = ? AND running = 0
+        """,
+        (now_iso(), task_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def finish_scheduled_task_run(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    next_run_at: Optional[str],
+    enabled: bool,
+    last_run_at: Optional[str],
+    last_error: Optional[str],
+    last_conversation_id: Optional[str],
+) -> bool:
+    cur = conn.execute(
+        """
+        UPDATE scheduled_tasks
+        SET
+            running = 0,
+            enabled = ?,
+            next_run_at = COALESCE(?, next_run_at),
+            last_run_at = ?,
+            last_error = ?,
+            last_conversation_id = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            1 if enabled else 0,
+            next_run_at,
+            last_run_at,
+            last_error,
+            last_conversation_id,
+            now_iso(),
+            task_id,
+        ),
     )
     conn.commit()
     return cur.rowcount > 0
@@ -2916,10 +3178,7 @@ def build_replay_history_from_rows(
             explicit_reinspect_ids.add(message_id)
     explicit_reinspect_ids.update(metadata_reinspect_message_ids(getattr(current_user_message, "metadata", None)))
 
-    should_suppress = (
-        current_user_message is None
-        or not message_content_has_inspectable_attachments(current_user_message.content)
-    ) and not query_requests_attachment_reinspection(query) and not explicit_reinspect_ids
+    should_suppress = not query_requests_attachment_reinspection(query) and not explicit_reinspect_ids
 
     if should_suppress:
         for row in row_list:
@@ -3257,6 +3516,9 @@ def build_current_attachment_prompt(current_user_message: Optional[Message]) -> 
             "- Reinspect the requested earlier attachment now and answer the user's current question in this same response."
         )
         lines.append(
+            "- If the requested earlier attachment is an image, analyze the replayed vision input directly; do not use Python merely to view it."
+        )
+        lines.append(
             "- Do not give a placeholder reply such as 'one moment', 'let me take a closer look', or similar unless tool access actually fails."
         )
         lines.append(
@@ -3265,6 +3527,9 @@ def build_current_attachment_prompt(current_user_message: Optional[Message]) -> 
     if has_image:
         lines.append(
             "- An image is attached in the current user turn. Analyze the attached image directly and answer from what is visibly present."
+        )
+        lines.append(
+            "- Do not use Python merely to view the attached image; the image is available to vision input, not as a Python file, unless a separate file attachment is provided."
         )
         lines.append(
             "- Do not say that you cannot see the image, cannot view it fully, or need the user to describe it unless the image payload is actually missing or unreadable."
@@ -4370,6 +4635,7 @@ def _finalize_response_result(
     extra_tools_used: Optional[Iterable[str]] = None,
     activity_log: Optional[Iterable[object]] = None,
     *,
+    messages: Optional[Iterable[Message]] = None,
     model: str,
     reasoning_effort: Optional[str] = None,
     text_override: Optional[str] = None,
@@ -4389,12 +4655,18 @@ def _finalize_response_result(
         normalized_activity_log = normalize_activity_log(activity_log)
         if not normalized_activity_log:
             normalized_activity_log = build_activity_log_from_tools(tools_used)
+        image_previews = (
+            fetch_web_image_previews(messages or [], response_data)
+            if messages is not None
+            else []
+        )
         return ResponseResult(
             text=text,
             tools_used=tools_used,
             activity_log=normalized_activity_log,
             model=model,
             reasoning_effort=reasoning_effort,
+            image_previews=image_previews,
         )
     raise RuntimeError(f"Unexpected API response format: {response_data}")
 
@@ -4582,6 +4854,7 @@ def _run_openai_response_loop(
                 response_data,
                 merge_tool_labels(tools_used, extracted_tools),
                 activity_log,
+                messages=message_list,
                 model=resolved_model,
                 reasoning_effort=normalized_reasoning_effort,
                 text_override=completed_text,
@@ -4669,6 +4942,7 @@ def _run_openai_response_loop(
         response_data,
         merge_tool_labels(tools_used, extracted_tools),
         activity_log,
+        messages=message_list,
         model=resolved_model,
         reasoning_effort=normalized_reasoning_effort,
         text_override=completed_text,
@@ -4748,6 +5022,7 @@ def stream_openai(
                     response_data,
                     tools_used,
                     activity_log,
+                    messages=message_list,
                     model=resolved_model,
                     reasoning_effort=normalized_reasoning_effort,
                 )
@@ -4758,6 +5033,7 @@ def stream_openai(
                     "activity_log": result.activity_log,
                     "model": result.model,
                     "reasoning_effort": result.reasoning_effort,
+                    "image_previews": result.image_previews,
                 }
                 return
 
@@ -4832,6 +5108,7 @@ def stream_openai(
             response_data,
             tools_used,
             activity_log,
+            messages=message_list,
             model=resolved_model,
             reasoning_effort=normalized_reasoning_effort,
         )
@@ -4842,6 +5119,7 @@ def stream_openai(
             "activity_log": result.activity_log,
             "model": result.model,
             "reasoning_effort": result.reasoning_effort,
+            "image_previews": result.image_previews,
         }
         return
 
@@ -4962,6 +5240,7 @@ def stream_openai(
                 forced_response,
                 tools_used,
                 activity_log,
+                messages=message_list,
                 model=resolved_model,
                 reasoning_effort=normalized_reasoning_effort,
                 text_override=forced_text,
@@ -4973,6 +5252,7 @@ def stream_openai(
                 "activity_log": forced_result.activity_log,
                 "model": forced_result.model,
                 "reasoning_effort": forced_result.reasoning_effort,
+                "image_previews": forced_result.image_previews,
             }
             return
 
@@ -4990,12 +5270,19 @@ def stream_openai(
             "activity_log": fallback_result.activity_log,
             "model": fallback_result.model,
             "reasoning_effort": fallback_result.reasoning_effort,
+            "image_previews": fallback_result.image_previews,
         }
         return
 
     final_activity_log = normalize_activity_log(activity_log)
     if not final_activity_log:
         final_activity_log = build_activity_log_from_tools(tools_used)
+
+    image_previews = (
+        fetch_web_image_previews(message_list, completed_response)
+        if isinstance(completed_response, dict)
+        else []
+    )
 
     yield {
         "type": "done",
@@ -5004,6 +5291,7 @@ def stream_openai(
         "activity_log": final_activity_log,
         "model": resolved_model,
         "reasoning_effort": normalized_reasoning_effort,
+        "image_previews": image_previews,
     }
 
 
@@ -5105,6 +5393,265 @@ def extract_container_file_citations(response_data: dict) -> List[Tuple[str, str
                 citations.append((container_id, file_id, filename))
 
     return citations
+
+
+def extract_url_citations(response_data: dict) -> List[dict]:
+    citations: List[dict] = []
+    seen = set()
+
+    for item in response_data.get("output", []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "message" or item.get("role") != "assistant":
+            continue
+
+        for block in item.get("content", []):
+            if not isinstance(block, dict):
+                continue
+
+            annotation_groups = []
+            block_annotations = block.get("annotations")
+            if isinstance(block_annotations, list):
+                annotation_groups.append(block_annotations)
+
+            text_block = block.get("text")
+            if isinstance(text_block, dict) and isinstance(text_block.get("annotations"), list):
+                annotation_groups.append(text_block["annotations"])
+
+            for annotations in annotation_groups:
+                for annotation in annotations:
+                    if not isinstance(annotation, dict):
+                        continue
+                    annotation_type = str(annotation.get("type") or "").strip().lower()
+                    if annotation_type != "url_citation":
+                        continue
+
+                    details = annotation.get("url_citation")
+                    if not isinstance(details, dict):
+                        details = annotation
+
+                    url = str(details.get("url") or annotation.get("url") or "").strip()
+                    if not url or url in seen:
+                        continue
+
+                    title = (
+                        str(details.get("title") or annotation.get("title") or "").strip()
+                        or str(details.get("text") or annotation.get("text") or "").strip()
+                    )
+                    seen.add(url)
+                    citations.append({"url": url, "title": title})
+
+    return citations
+
+
+class _PreviewHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.meta: dict[str, str] = {}
+        self.title_parts: List[str] = []
+        self.first_image = ""
+        self._in_title = False
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        attr_map = {str(key or "").lower(): str(value or "") for key, value in attrs}
+        normalized_tag = str(tag or "").lower()
+
+        if normalized_tag == "meta":
+            key = (
+                attr_map.get("property")
+                or attr_map.get("name")
+                or attr_map.get("itemprop")
+                or ""
+            ).strip().lower()
+            content = attr_map.get("content", "").strip()
+            if key and content and key not in self.meta:
+                self.meta[key] = html.unescape(content)
+            return
+
+        if normalized_tag == "title":
+            self._in_title = True
+            return
+
+        if normalized_tag == "img" and not self.first_image:
+            candidate = (
+                attr_map.get("src")
+                or attr_map.get("data-src")
+                or attr_map.get("data-original")
+                or ""
+            ).strip()
+            if not candidate:
+                srcset = attr_map.get("srcset", "").strip()
+                if srcset:
+                    candidate = srcset.split(",", 1)[0].strip().split(" ", 1)[0].strip()
+            if candidate:
+                self.first_image = html.unescape(candidate)
+
+    def handle_endtag(self, tag: str) -> None:
+        if str(tag or "").lower() == "title":
+            self._in_title = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title and data:
+            self.title_parts.append(data)
+
+    @property
+    def title(self) -> str:
+        return " ".join(part.strip() for part in self.title_parts if part.strip()).strip()
+
+
+_VISUAL_QUERY_PATTERN = re.compile(
+    r"\b("
+    r"image|images|photo|photos|picture|pictures|pic|show|look like|looks like|"
+    r"screenshot|screenshots|wallpaper|icon|logo|map|monument|landmark|museum|"
+    r"statue|temple|cathedral|church|castle|tower|bridge|palace|park|garden|"
+    r"beach|mountain|waterfall|city|town|village|island|location|place|building|"
+    r"neighborhood|district|game|video game|character"
+    r")\b",
+    re.IGNORECASE,
+)
+_NON_VISUAL_QUERY_PATTERN = re.compile(
+    r"\b("
+    r"why|how|compare|difference|differences|pros|cons|analysis|analyze|law|"
+    r"regulation|policy|tax|stock|price|prices|forecast|forecasts|schedule|schedules"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _last_user_message_text(messages: Iterable[Message]) -> str:
+    for message in reversed(list(messages)):
+        if message.role == "user":
+            return _message_text_for_routing(message)
+    return ""
+
+
+def should_fetch_web_image_previews(messages: Iterable[Message], response_data: dict) -> bool:
+    if "web" not in extract_used_tools(response_data):
+        return False
+    if not extract_url_citations(response_data):
+        return False
+
+    query_text = _last_user_message_text(messages).strip()
+    if not query_text:
+        return False
+
+    lowered = query_text.lower()
+    if _VISUAL_QUERY_PATTERN.search(lowered):
+        return True
+
+    word_count = len(re.findall(r"\w+", lowered))
+    if 1 <= word_count <= 8 and not _NON_VISUAL_QUERY_PATTERN.search(lowered):
+        return True
+
+    return False
+
+
+def _normalize_preview_url(candidate: str, base_url: str) -> str:
+    raw = str(candidate or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("//"):
+        base_scheme = urlparse(base_url).scheme or "https"
+        raw = f"{base_scheme}:{raw}"
+    elif not urlparse(raw).scheme:
+        raw = urljoin(base_url, raw)
+
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"}:
+        return ""
+    return raw
+
+
+def extract_image_preview_from_html(page_url: str, html_text: str) -> dict:
+    parser = _PreviewHTMLParser()
+    try:
+        parser.feed(html_text or "")
+        parser.close()
+    except Exception:
+        pass
+
+    candidates = [
+        parser.meta.get("og:image:secure_url", ""),
+        parser.meta.get("og:image:url", ""),
+        parser.meta.get("og:image", ""),
+        parser.meta.get("twitter:image:src", ""),
+        parser.meta.get("twitter:image", ""),
+        parser.meta.get("image", ""),
+        parser.meta.get("image_src", ""),
+        parser.first_image,
+    ]
+
+    image_url = ""
+    for candidate in candidates:
+        image_url = _normalize_preview_url(candidate, page_url)
+        if image_url:
+            break
+
+    title = (
+        parser.meta.get("og:title", "")
+        or parser.meta.get("twitter:title", "")
+        or parser.title
+    ).strip()
+    return {"image_url": image_url, "title": title}
+
+
+def fetch_web_image_previews(messages: Iterable[Message], response_data: dict, limit: int = 3) -> List[dict]:
+    if not should_fetch_web_image_previews(messages, response_data):
+        return []
+
+    previews: List[dict] = []
+    seen_images = set()
+    seen_sources = set()
+
+    for citation in extract_url_citations(response_data):
+        source_url = str(citation.get("url") or "").strip()
+        if not source_url or source_url in seen_sources:
+            continue
+        seen_sources.add(source_url)
+
+        req = request.Request(
+            source_url,
+            method="GET",
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; 4o-Preservation/1.0; +https://openai.com/)",
+                "Accept": "text/html,application/xhtml+xml",
+            },
+        )
+
+        try:
+            with request.urlopen(req, timeout=8) as response:
+                content_type = str(response.headers.get("Content-Type") or "").lower()
+                if "html" not in content_type and "xml" not in content_type:
+                    continue
+                payload = response.read(200_000)
+        except Exception:
+            continue
+
+        try:
+            html_text = payload.decode("utf-8", errors="replace")
+        except Exception:
+            continue
+
+        preview = extract_image_preview_from_html(source_url, html_text)
+        image_url = str(preview.get("image_url") or "").strip()
+        if not image_url or image_url in seen_images:
+            continue
+
+        seen_images.add(image_url)
+        parsed_source = urlparse(source_url)
+        source_label = parsed_source.netloc.replace("www.", "").strip() or source_url
+        previews.append(
+            {
+                "image_url": image_url,
+                "source_url": source_url,
+                "source_label": source_label,
+                "title": str(preview.get("title") or citation.get("title") or source_label).strip(),
+            }
+        )
+        if len(previews) >= max(1, limit):
+            break
+
+    return previews
 
 
 def fetch_container_file_content(container_id: str, file_id: str) -> Tuple[bytes, str]:

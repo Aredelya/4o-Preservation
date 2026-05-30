@@ -11,7 +11,7 @@ import shlex
 import re
 import threading
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Iterable, Optional
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -63,6 +63,9 @@ from core import (
     list_memories,
     list_memory_suggestions,
     load_env_file,
+    message_content_has_file_attachment,
+    message_content_has_image_attachment,
+    message_content_has_inspectable_attachments,
     message_from_row,
     normalize_chat_model,
     reasoning_model_supported,
@@ -457,6 +460,146 @@ def _library_local_url(record: dict) -> str:
     if not relpath:
         return ""
     return f"/library-files/{relpath}"
+
+
+def _row_has_attachment_type(row, predicate) -> bool:
+    try:
+        message = message_from_row(row)
+    except Exception:
+        return False
+    return bool(predicate(message.content))
+
+
+def should_disable_code_interpreter_for_image_turn(
+    current_user_message: Message,
+    history_rows,
+    reinspect_message_ids: Optional[Iterable[int]] = None,
+) -> bool:
+    has_active_image = message_content_has_image_attachment(current_user_message.content)
+    has_active_file = message_content_has_file_attachment(current_user_message.content)
+
+    reinspect_ids = set()
+    for raw_id in list(reinspect_message_ids or []):
+        try:
+            message_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if message_id > 0:
+            reinspect_ids.add(message_id)
+
+    if reinspect_ids:
+        for row in list(history_rows or []):
+            try:
+                row_id = int(row["id"])
+            except Exception:
+                continue
+            if row_id not in reinspect_ids or str(row["role"] or "") != "user":
+                continue
+            has_active_image = has_active_image or _row_has_attachment_type(
+                row,
+                message_content_has_image_attachment,
+            )
+            has_active_file = has_active_file or _row_has_attachment_type(
+                row,
+                message_content_has_file_attachment,
+            )
+
+    return has_active_image and not has_active_file
+
+
+def include_reinspect_rows(conn, conversation_id: str, rows, reinspect_message_ids: Iterable[int]):
+    row_list = list(rows or [])
+    existing_ids = {int(row["id"]) for row in row_list}
+
+    for raw_id in list(reinspect_message_ids or []):
+        try:
+            message_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if message_id <= 0 or message_id in existing_ids:
+            continue
+        row = get_message_row(conn, conversation_id, message_id)
+        if row is None or str(row["role"] or "") != "user":
+            continue
+        row_list.append(row)
+        existing_ids.add(message_id)
+
+    return sorted(row_list, key=lambda row: int(row["id"]))
+
+
+def missing_reinspect_attachment_payload_ids(rows, reinspect_message_ids: Iterable[int]) -> list[int]:
+    requested_ids = set()
+    for raw_id in list(reinspect_message_ids or []):
+        try:
+            message_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if message_id > 0:
+            requested_ids.add(message_id)
+
+    missing: list[int] = []
+    for message_id in sorted(requested_ids):
+        row = next((item for item in rows if int(item["id"]) == message_id), None)
+        if row is None or str(row["role"] or "") != "user":
+            missing.append(message_id)
+            continue
+        try:
+            message = message_from_row(row)
+        except Exception:
+            missing.append(message_id)
+            continue
+        if not message_content_has_inspectable_attachments(message.content):
+            missing.append(message_id)
+    return missing
+
+
+def _clone_reinspect_attachment_blocks(rows, reinspect_message_ids: Iterable[int]) -> list[dict]:
+    requested_ids = []
+    seen = set()
+    for raw_id in list(reinspect_message_ids or []):
+        try:
+            message_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if message_id > 0 and message_id not in seen:
+            seen.add(message_id)
+            requested_ids.append(message_id)
+
+    blocks: list[dict] = []
+    for message_id in requested_ids:
+        row = next((item for item in rows if int(item["id"]) == message_id), None)
+        if row is None or str(row["role"] or "") != "user":
+            continue
+        message = message_from_row(row)
+        if not isinstance(message.content, list):
+            continue
+        for block in message.content:
+            if not isinstance(block, dict):
+                continue
+            if str(block.get("type") or "") in {"input_image", "input_file"}:
+                blocks.append(dict(block))
+    return blocks
+
+
+def build_model_reinspect_user_message(user_message: Message, rows, reinspect_message_ids: Iterable[int]) -> Message:
+    attachment_blocks = _clone_reinspect_attachment_blocks(rows, reinspect_message_ids)
+    if not attachment_blocks:
+        return user_message
+
+    content = user_message.content
+    if isinstance(content, list):
+        model_content = [dict(block) if isinstance(block, dict) else block for block in content]
+    else:
+        model_content = [{"type": "input_text", "text": str(content or "")}]
+
+    model_content.append(
+        {
+            "type": "input_text",
+            "text": "Reanalyze the attached earlier image/file copied into this current turn.",
+        }
+    )
+    model_content.extend(attachment_blocks)
+    return Message(user_message.role, model_content, user_message.metadata)
 
 
 def _run_scheduled_task(task_id: str) -> dict:
@@ -1796,19 +1939,45 @@ class ChatHandler(BaseHTTPRequestHandler):
                 raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
 
             history_rows = get_recent_message_rows_with_ids(conn, conversation_id)
+            history_rows = include_reinspect_rows(
+                conn,
+                conversation_id,
+                history_rows,
+                reinspect_message_ids,
+            )
+            missing_reinspect_ids = missing_reinspect_attachment_payload_ids(
+                history_rows,
+                reinspect_message_ids,
+            )
+            if missing_reinspect_ids:
+                raise ApiError(
+                    "The selected attachment is no longer available locally. Please upload it again.",
+                    HTTPStatus.GONE,
+                )
+            if should_disable_code_interpreter_for_image_turn(
+                user_message,
+                history_rows,
+                reinspect_message_ids,
+            ):
+                enable_code_interpreter = False
+            model_user_message = build_model_reinspect_user_message(
+                user_message,
+                history_rows,
+                reinspect_message_ids,
+            )
             history = build_replay_history_from_rows(
                 history_rows,
                 query=content or "Attachment upload",
-                current_user_message=user_message,
+                current_user_message=model_user_message,
                 reinspect_message_ids=reinspect_message_ids,
             )
             system_prompt = build_system_prompt(
                 conn,
                 content or "Attachment upload",
                 conversation_id=conversation_id,
-                current_user_message=user_message,
+                current_user_message=model_user_message,
             )
-            messages = [Message("system", system_prompt), *history, user_message]
+            messages = [Message("system", system_prompt), *history, model_user_message]
 
             user_message_id = add_message_returning_id(conn, conversation_id, user_message)
             auto_extract_memory_suggestions_from_user_text(
@@ -1836,7 +2005,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             inspected_attachment_message_ids = infer_inspected_attachment_message_ids(
                 history_rows,
                 current_user_message_id=user_message_id,
-                current_user_message=user_message,
+                current_user_message=model_user_message,
                 tools_used=response_text.tools_used,
                 response_text=response_text.text,
             )
@@ -1905,19 +2074,45 @@ class ChatHandler(BaseHTTPRequestHandler):
                 raise ApiError("Conversation not found", HTTPStatus.NOT_FOUND)
 
             history_rows = get_recent_message_rows_with_ids(conn, conversation_id)
+            history_rows = include_reinspect_rows(
+                conn,
+                conversation_id,
+                history_rows,
+                reinspect_message_ids,
+            )
+            missing_reinspect_ids = missing_reinspect_attachment_payload_ids(
+                history_rows,
+                reinspect_message_ids,
+            )
+            if missing_reinspect_ids:
+                raise ApiError(
+                    "The selected attachment is no longer available locally. Please upload it again.",
+                    HTTPStatus.GONE,
+                )
+            if should_disable_code_interpreter_for_image_turn(
+                user_message,
+                history_rows,
+                reinspect_message_ids,
+            ):
+                enable_code_interpreter = False
+            model_user_message = build_model_reinspect_user_message(
+                user_message,
+                history_rows,
+                reinspect_message_ids,
+            )
             history = build_replay_history_from_rows(
                 history_rows,
                 query=content or "Attachment upload",
-                current_user_message=user_message,
+                current_user_message=model_user_message,
                 reinspect_message_ids=reinspect_message_ids,
             )
             system_prompt = build_system_prompt(
                 conn,
                 content or "Attachment upload",
                 conversation_id=conversation_id,
-                current_user_message=user_message,
+                current_user_message=model_user_message,
             )
-            messages = [Message("system", system_prompt), *history, user_message]
+            messages = [Message("system", system_prompt), *history, model_user_message]
             user_message_id = add_message_returning_id(conn, conversation_id, user_message)
             auto_extract_memory_suggestions_from_user_text(
                 conn,
@@ -1939,12 +2134,12 @@ class ChatHandler(BaseHTTPRequestHandler):
                         reasoning_effort=chat_options["reasoning_effort"],
                     )
                     inspected_attachment_message_ids = infer_inspected_attachment_message_ids(
-                        history_rows,
-                        current_user_message_id=user_message_id,
-                        current_user_message=user_message,
-                        tools_used=response_text.tools_used,
-                        response_text=response_text.text,
-                    )
+                            history_rows,
+                            current_user_message_id=user_message_id,
+                            current_user_message=model_user_message,
+                            tools_used=response_text.tools_used,
+                            response_text=response_text.text,
+                        )
                     assistant_id = self._add_assistant_message_returning_id(
                         conn,
                         conversation_id,
@@ -2023,7 +2218,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                         inspected_attachment_message_ids = infer_inspected_attachment_message_ids(
                             history_rows,
                             current_user_message_id=user_message_id,
-                            current_user_message=user_message,
+                            current_user_message=model_user_message,
                             tools_used=tools_used,
                             response_text=final_text,
                         )
@@ -2164,10 +2359,36 @@ class ChatHandler(BaseHTTPRequestHandler):
             original_title = get_conversation_title(conn, conversation_id) or "Chat"
             history_rows = get_all_messages_with_ids(conn, conversation_id)
             history_rows = [row for row in history_rows if row["id"] < message_id]
+            history_rows = include_reinspect_rows(
+                conn,
+                conversation_id,
+                history_rows,
+                reinspect_message_ids,
+            )
+            missing_reinspect_ids = missing_reinspect_attachment_payload_ids(
+                history_rows,
+                reinspect_message_ids,
+            )
+            if missing_reinspect_ids:
+                raise ApiError(
+                    "The selected attachment is no longer available locally. Please upload it again.",
+                    HTTPStatus.GONE,
+                )
+            if should_disable_code_interpreter_for_image_turn(
+                user_message,
+                history_rows,
+                reinspect_message_ids,
+            ):
+                enable_code_interpreter = False
+            model_user_message = build_model_reinspect_user_message(
+                user_message,
+                history_rows,
+                reinspect_message_ids,
+            )
             history = build_replay_history_from_rows(
                 history_rows,
                 query=content or "Attachment upload",
-                current_user_message=user_message,
+                current_user_message=model_user_message,
                 reinspect_message_ids=reinspect_message_ids,
             )
 
@@ -2175,9 +2396,9 @@ class ChatHandler(BaseHTTPRequestHandler):
                 conn,
                 content or "Attachment upload",
                 conversation_id=conversation_id,
-                current_user_message=user_message,
+                current_user_message=model_user_message,
             )
-            messages = [Message("system", system_prompt), *history, user_message]
+            messages = [Message("system", system_prompt), *history, model_user_message]
 
             try:
                 target_conversation_id = conversation_id
@@ -2223,7 +2444,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             inspected_attachment_message_ids = infer_inspected_attachment_message_ids(
                 history_rows,
                 current_user_message_id=edited_user_message_id,
-                current_user_message=user_message,
+                current_user_message=model_user_message,
                 tools_used=response_text.tools_used,
                 response_text=response_text.text,
             )
@@ -2346,6 +2567,12 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             history_rows = get_all_messages_with_ids(conn, conversation_id)
             history_rows = [row for row in history_rows if row["id"] < user_row["id"]]
+            if should_disable_code_interpreter_for_image_turn(
+                original_user_message,
+                history_rows,
+                [],
+            ):
+                enable_code_interpreter = False
             history = build_replay_history_from_rows(
                 history_rows,
                 query=original_content or "Regenerate response",
@@ -2489,6 +2716,12 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             history_rows = get_all_messages_with_ids(conn, conversation_id)
             history_rows = [row for row in history_rows if row["id"] < user_row["id"]]
+            if should_disable_code_interpreter_for_image_turn(
+                original_user_message,
+                history_rows,
+                [],
+            ):
+                enable_code_interpreter = False
             history = build_replay_history_from_rows(
                 history_rows,
                 query=original_content or "Regenerate response",
