@@ -3370,6 +3370,7 @@ const loadLibrary = async () => {
 const renderMemorySuggestions = () => {
   if (!memorySuggestionsList) return;
   memorySuggestionsList.innerHTML = "";
+  memorySuggestionsList.scrollTop = 0;
 
   const titleCase = (value = "") =>
     String(value)

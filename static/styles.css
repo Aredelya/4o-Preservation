@@ -3076,3 +3076,32 @@ h3,
     padding: 12px;
   }
 }
+
+/* --- Suggested memories should not collapse while triaging --- */
+#memoryPanel #memorySuggestions:not([hidden]) {
+  flex: 0 0 auto !important;
+  min-height: 172px !important;
+  max-height: min(42vh, 360px);
+  overflow-y: auto;
+  padding-right: 4px;
+  margin-bottom: 14px;
+}
+
+#memoryPanel #memorySuggestions:not([hidden]) .muted:first-child {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 2px 0 6px;
+  background: rgba(17, 23, 34, 0.94);
+}
+
+#memoryPanel #memorySuggestions:not([hidden]) .suggestion-item {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 760px) {
+  #memoryPanel #memorySuggestions:not([hidden]) {
+    min-height: 210px !important;
+    max-height: 38vh;
+  }
+}
