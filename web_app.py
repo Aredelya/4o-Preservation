@@ -507,6 +507,96 @@ def should_disable_code_interpreter_for_image_turn(
     return has_active_image and not has_active_file
 
 
+def query_requests_code_interpreter(query: Optional[str]) -> bool:
+    normalized = re.sub(r"\s+", " ", str(query or "").strip().lower())
+    if not normalized:
+        return False
+
+    direct_terms = (
+        "code interpreter",
+        "python",
+        "run code",
+        "execute code",
+        "run this",
+        "calculate",
+        "compute",
+        "spreadsheet",
+        "dataframe",
+        "csv",
+        "json",
+        "plot",
+        "chart",
+        "graph",
+        "statistics",
+        "statistical",
+        "regression",
+    )
+    if any(term in normalized for term in direct_terms):
+        return True
+
+    if re.search(r"\b(solve|evaluate|estimate|convert)\b", normalized) and re.search(
+        r"\b(number|numbers|equation|formula|math|units?|dataset|data)\b",
+        normalized,
+    ):
+        return True
+
+    return False
+
+
+def active_reinspect_attachment_flags(rows, reinspect_message_ids: Optional[Iterable[int]]) -> tuple[bool, bool]:
+    requested_ids = set()
+    for raw_id in list(reinspect_message_ids or []):
+        try:
+            message_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if message_id > 0:
+            requested_ids.add(message_id)
+
+    has_image = False
+    has_file = False
+    if not requested_ids:
+        return has_image, has_file
+
+    for row in list(rows or []):
+        try:
+            row_id = int(row["id"])
+        except Exception:
+            continue
+        if row_id not in requested_ids or str(row["role"] or "") != "user":
+            continue
+        has_image = has_image or _row_has_attachment_type(row, message_content_has_image_attachment)
+        has_file = has_file or _row_has_attachment_type(row, message_content_has_file_attachment)
+
+    return has_image, has_file
+
+
+def resolve_code_interpreter_for_turn(
+    requested_enabled: bool,
+    current_user_message: Message,
+    history_rows,
+    reinspect_message_ids: Optional[Iterable[int]] = None,
+    query: Optional[str] = None,
+) -> bool:
+    if not requested_enabled:
+        return False
+
+    has_current_image = message_content_has_image_attachment(current_user_message.content)
+    has_current_file = message_content_has_file_attachment(current_user_message.content)
+    has_reinspect_image, has_reinspect_file = active_reinspect_attachment_flags(
+        history_rows,
+        reinspect_message_ids,
+    )
+
+    if (has_current_image or has_reinspect_image) and not (has_current_file or has_reinspect_file):
+        return False
+
+    if has_current_file or has_reinspect_file:
+        return True
+
+    return query_requests_code_interpreter(query)
+
+
 def include_reinspect_rows(conn, conversation_id: str, rows, reinspect_message_ids: Iterable[int]):
     row_list = list(rows or [])
     existing_ids = {int(row["id"]) for row in row_list}
@@ -1954,12 +2044,13 @@ class ChatHandler(BaseHTTPRequestHandler):
                     "The selected attachment is no longer available locally. Please upload it again.",
                     HTTPStatus.GONE,
                 )
-            if should_disable_code_interpreter_for_image_turn(
+            enable_code_interpreter = resolve_code_interpreter_for_turn(
+                enable_code_interpreter,
                 user_message,
                 history_rows,
                 reinspect_message_ids,
-            ):
-                enable_code_interpreter = False
+                content,
+            )
             model_user_message = build_model_reinspect_user_message(
                 user_message,
                 history_rows,
@@ -2089,12 +2180,13 @@ class ChatHandler(BaseHTTPRequestHandler):
                     "The selected attachment is no longer available locally. Please upload it again.",
                     HTTPStatus.GONE,
                 )
-            if should_disable_code_interpreter_for_image_turn(
+            enable_code_interpreter = resolve_code_interpreter_for_turn(
+                enable_code_interpreter,
                 user_message,
                 history_rows,
                 reinspect_message_ids,
-            ):
-                enable_code_interpreter = False
+                content,
+            )
             model_user_message = build_model_reinspect_user_message(
                 user_message,
                 history_rows,
@@ -2374,12 +2466,13 @@ class ChatHandler(BaseHTTPRequestHandler):
                     "The selected attachment is no longer available locally. Please upload it again.",
                     HTTPStatus.GONE,
                 )
-            if should_disable_code_interpreter_for_image_turn(
+            enable_code_interpreter = resolve_code_interpreter_for_turn(
+                enable_code_interpreter,
                 user_message,
                 history_rows,
                 reinspect_message_ids,
-            ):
-                enable_code_interpreter = False
+                content,
+            )
             model_user_message = build_model_reinspect_user_message(
                 user_message,
                 history_rows,
@@ -2567,12 +2660,13 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             history_rows = get_all_messages_with_ids(conn, conversation_id)
             history_rows = [row for row in history_rows if row["id"] < user_row["id"]]
-            if should_disable_code_interpreter_for_image_turn(
+            enable_code_interpreter = resolve_code_interpreter_for_turn(
+                enable_code_interpreter,
                 original_user_message,
                 history_rows,
                 [],
-            ):
-                enable_code_interpreter = False
+                original_content,
+            )
             history = build_replay_history_from_rows(
                 history_rows,
                 query=original_content or "Regenerate response",
@@ -2716,12 +2810,13 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             history_rows = get_all_messages_with_ids(conn, conversation_id)
             history_rows = [row for row in history_rows if row["id"] < user_row["id"]]
-            if should_disable_code_interpreter_for_image_turn(
+            enable_code_interpreter = resolve_code_interpreter_for_turn(
+                enable_code_interpreter,
                 original_user_message,
                 history_rows,
                 [],
-            ):
-                enable_code_interpreter = False
+                original_content,
+            )
             history = build_replay_history_from_rows(
                 history_rows,
                 query=original_content or "Regenerate response",

@@ -3466,9 +3466,20 @@ def build_recent_attachment_guard_prompt(
     if not inspected_rows:
         return ""
 
+    if current_user_message is None or not message_content_has_inspectable_attachments(current_user_message.content):
+        return (
+            "\n\nMedia context guard:\n"
+            "- The current user turn has no visual or document input attached.\n"
+            "- Previously sent media is closed context and is not pending any action.\n"
+            "- Do not mention prior media, ask whether it is connected to the current scene, or offer to open/review/analyze it unless the user explicitly asks."
+            "\n- Answer the current text normally from conversation context."
+        )
+
     lines = []
     for row in inspected_rows[-3:]:
         summary = re.sub(r"\s+", " ", str(row["content"] or "")).strip()
+        summary = re.sub(r"\[image\]", "(closed prior image)", summary, flags=re.IGNORECASE)
+        summary = re.sub(r"\[file(?::[^\]]+)?\]", "(closed prior file)", summary, flags=re.IGNORECASE)
         if len(summary) > 120:
             summary = summary[:117].rstrip() + "..."
         if summary:
@@ -3480,20 +3491,36 @@ def build_recent_attachment_guard_prompt(
         return ""
 
     prompt = (
-        "\n\nAttachment guidance:\n"
-        "These attachments were already inspected with tools recently:\n"
-        f"{chr(10).join(lines)}\n"
-        "Do not use tools to reopen or reprocess the same attachment again unless the user explicitly asks "
-        "to analyze, inspect, describe, or read it again. Prefer answering from the already available context."
+        "\n\nHistorical attachment guard:\n"
+        "Some earlier user turns had image/file attachments that were already processed and are now closed context.\n"
+        f"Closed attachment turns: {chr(10).join(lines)}\n"
+        "Do not use tools to reopen, reprocess, or inspect closed prior attachments unless the user explicitly asks "
+        "to analyze, inspect, describe, read, or reanalyze them."
     )
-    if current_user_message is None or not message_content_has_inspectable_attachments(current_user_message.content):
-        prompt += (
-            "\n- No new attachment is uploaded in the current user turn."
-            "\n- Treat the user's message as a follow-up about the already-seen attachment(s) above unless they clearly ask for a fresh inspection."
-            "\n- Do not speak as if they just brought, shared, uploaded, or sent you a new image or file."
-            "\n- Do not offer to open, explore, or take a closer look again unless the user explicitly asks for renewed analysis."
-        )
+    prompt += (
+        "\n- If the current user turn includes a new attachment, focus on the current attachment only."
+        "\n- Do not describe closed prior attachments as newly uploaded or ask whether to inspect them."
+    )
     return prompt
+
+
+def build_historical_media_text_guard_prompt(current_user_message: Optional[Message] = None) -> str:
+    has_current_attachment = (
+        current_user_message is not None
+        and message_content_has_inspectable_attachments(current_user_message.content)
+    )
+    current_attachment_line = (
+        "- The current user turn includes media, so handle only the current/replayed attachment unless the user explicitly asks about older media."
+        if has_current_attachment
+        else "- The current user turn has no media attached; do not imply there is a current upload."
+    )
+    return (
+        "\n\nHistorical media text rule:\n"
+        "- Mentions of uploaded, sent, shared, attached, or generated images/files in memories, summaries, or earlier text are historical text only.\n"
+        "- Historical media text is not a live attachment and is not pending review.\n"
+        f"{current_attachment_line}\n"
+        "- Do not offer to open, inspect, review, reanalyze, or use tools on historical media unless the user explicitly asks."
+    )
 
 
 def build_current_attachment_prompt(current_user_message: Optional[Message]) -> str:
@@ -3693,6 +3720,7 @@ def build_system_prompt(
     )
 
     prompt = SYSTEM_PROMPT_TEMPLATE.format(memories=memories_text) + calendar_context
+    prompt += build_historical_media_text_guard_prompt(current_user_message)
     prompt += build_recent_attachment_guard_prompt(
         conn,
         conversation_id,
