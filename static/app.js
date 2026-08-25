@@ -1399,6 +1399,9 @@ const regenerateAssistantMessage = async (message, options = {}) => {
   if (!state.activeConversation || state.isSending) return;
 
   const regenerateMode = String(options.mode || "same").trim().toLowerCase() || "same";
+  const regenerateWebSearchMode = (
+    String(options.webSearchMode || "same").trim().toLowerCase() || "same"
+  );
   const selectedChatOptions = getSelectedChatOptions();
   if (regenerateMode === "higher_reasoning") {
     selectedChatOptions.enable_reasoning = true;
@@ -1437,6 +1440,7 @@ const regenerateAssistantMessage = async (message, options = {}) => {
         conversation_id: state.activeConversation,
         message_id: message.id,
         enable_web_search: !!enableWebSearchInput?.checked,
+        regenerate_web_search_mode: regenerateWebSearchMode,
         enable_code_interpreter: !!enableCodeInterpreterInput?.checked,
         regenerate_mode: regenerateMode,
         ...selectedChatOptions,
@@ -2570,6 +2574,16 @@ const createMessageElement = (message) => {
   });
 
   wrap.appendChild(bubble);
+
+  if (message.created_at) {
+    const timestamp = document.createElement("time");
+    timestamp.className = "message-timestamp";
+    timestamp.dateTime = message.created_at;
+    timestamp.textContent = formatLibraryTime(message.created_at);
+    timestamp.title = new Date(message.created_at).toLocaleString();
+    wrap.appendChild(timestamp);
+  }
+
   addImageDownloadActions(wrap, bubble, message);
 
   const attachmentCards = createAttachmentCards(message);
@@ -2618,6 +2632,8 @@ const createMessageElement = (message) => {
     regenerateModeSelect.setAttribute("aria-label", "Regenerate option");
     regenerateModeSelect.innerHTML = `
       <option value="same">Same settings</option>
+      <option value="use_web_search">Use web search</option>
+      <option value="no_web_search">Don't use web search</option>
       <option value="concise">More concise</option>
       <option value="detailed">More detailed</option>
       <option value="higher_reasoning">Higher reasoning</option>
@@ -2629,7 +2645,19 @@ const createMessageElement = (message) => {
     regenerateButton.className = "secondary message-action-button";
     regenerateButton.textContent = "Regenerate";
     regenerateButton.onclick = () => {
-      void regenerateAssistantMessage(message, { mode: regenerateModeSelect.value });
+      const selectedValue = regenerateModeSelect.value;
+      const webSearchMode = selectedValue === "use_web_search"
+        ? "force"
+        : selectedValue === "no_web_search"
+          ? "off"
+          : "same";
+      const responseMode = ["use_web_search", "no_web_search"].includes(selectedValue)
+        ? "same"
+        : selectedValue;
+      void regenerateAssistantMessage(message, {
+        mode: responseMode,
+        webSearchMode,
+      });
     };
     actions.appendChild(regenerateButton);
   }
@@ -2771,11 +2799,12 @@ const renderConversations = () => {
     row.className = `list-item${convo.pinned ? " pinned" : ""}`;
 
     const button = document.createElement("button");
-    const title = `${convo.pinned ? "Pinned · " : ""}${convo.title || "Untitled"} · ${convo.id.slice(0, 8)}`;
+    const title = `${convo.pinned ? "Pinned · " : ""}${convo.title || "Untitled"}`;
+    const createdAt = formatConversationTime(convo.created_at || "");
     const snippet = (convo.snippet || "").replace(/\s+/g, " ").trim();
     const preview = snippet.length > 96 ? `${snippet.slice(0, 93)}...` : snippet;
 
-    button.textContent = preview ? `${title}\n${preview}` : title;
+    button.textContent = [title, createdAt, preview].filter(Boolean).join("\n");
     button.className = `list-primary${convo.id === state.activeConversation ? " active" : ""}`;
     button.type = "button";
     button.onclick = () => {
@@ -3244,6 +3273,11 @@ const formatLibraryTime = (isoString = "") => {
   const date = new Date(isoString);
   if (Number.isNaN(date.getTime())) return isoString || "";
   return date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+};
+
+const formatConversationTime = (isoString = "") => {
+  const formatted = formatLibraryTime(isoString);
+  return formatted ? `Created ${formatted}` : "";
 };
 
 const guessImageExtension = (url = "") => {

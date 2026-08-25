@@ -416,6 +416,16 @@ h3 {
   align-items: flex-start;
 }
 
+.message-timestamp {
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.2;
+}
+
+.message-row.user .message-timestamp {
+  align-self: flex-end;
+}
+
 .message-image-previews {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -2239,12 +2249,22 @@ h3 {
 
   /* Hide always-visible utility clutter on phones */
   .chat-heading-actions,
-  .search-row,
   .search-nav,
   .search-buttons,
   .search-actions,
   .mobile-search-tools {
     display: none !important;
+  }
+
+  .search-row {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) auto !important;
+    gap: 8px !important;
+    align-items: center !important;
+  }
+
+  #clearConversationSearch {
+    width: auto !important;
   }
 
   /* Messages should win the height battle */
@@ -3103,5 +3123,201 @@ h3,
   #memoryPanel #memorySuggestions:not([hidden]) {
     min-height: 210px !important;
     max-height: 38vh;
+  }
+}
+
+/* --- Final landscape phone layout --- */
+@media (max-width: 1100px) and (orientation: landscape) {
+  main {
+    grid-template-columns: minmax(210px, 32vw) minmax(0, 1fr) !important;
+    grid-template-rows: minmax(0, 1fr) !important;
+    grid-template-areas: "left center" !important;
+    min-height: calc(100dvh - 76px) !important;
+    height: calc(100dvh - 76px) !important;
+    overflow: hidden !important;
+  }
+
+  .panel-conversations {
+    position: static !important;
+    grid-area: left !important;
+    display: flex !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    height: 100% !important;
+    padding: 12px !important;
+    transform: none !important;
+    opacity: 1 !important;
+    pointer-events: auto !important;
+    overflow: hidden !important;
+    box-shadow: none !important;
+  }
+
+  .panel-conversations .list {
+    min-height: 0 !important;
+    overflow-y: auto !important;
+  }
+
+  .panel-memories {
+    display: none !important;
+  }
+
+  .panel-chat {
+    grid-area: center !important;
+    display: flex !important;
+    flex-direction: column !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    height: 100% !important;
+    padding: 10px !important;
+    overflow: hidden !important;
+  }
+
+  .messages,
+  #messageList {
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    overflow-y: auto !important;
+  }
+
+  .panel-chat .composer {
+    flex: 0 1 auto !important;
+    max-height: 42dvh !important;
+    margin-top: 8px !important;
+    overflow-y: auto !important;
+  }
+
+  .mobile-only {
+    display: none !important;
+  }
+
+  .search-row {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) auto !important;
+    gap: 8px !important;
+    align-items: center !important;
+  }
+
+  #clearConversationSearch {
+    width: auto !important;
+  }
+
+  header {
+    min-height: 48px !important;
+    margin: 6px 8px 0 !important;
+    padding: 8px 10px !important;
+    gap: 8px !important;
+  }
+
+  header strong {
+    font-size: 0.95rem !important;
+    line-height: 1.1 !important;
+  }
+
+  .header-actions {
+    gap: 6px !important;
+  }
+
+  .header-actions button {
+    min-height: 36px !important;
+    padding: 6px 10px !important;
+    font-size: 0.9rem !important;
+  }
+
+  .panel-conversations,
+  .panel-chat {
+    border-radius: 14px !important;
+  }
+
+  .panel-conversations {
+    padding: 8px !important;
+  }
+
+  .panel-chat {
+    padding: 8px !important;
+  }
+
+  .panel-conversations .panel-heading,
+  .panel-chat .chat-panel-heading {
+    margin-bottom: 8px !important;
+    gap: 6px !important;
+  }
+
+  .panel-conversations h2,
+  .panel-chat h2 {
+    font-size: 1rem !important;
+  }
+
+  .list {
+    gap: 6px !important;
+  }
+
+  .list-item button {
+    font-size: 0.78rem !important;
+  }
+
+  .list-primary {
+    padding: 8px !important;
+    line-height: 1.25 !important;
+  }
+
+  .list-item-actions {
+    align-items: center !important;
+    gap: 4px !important;
+  }
+
+  .list-item .conversation-pin,
+  .list-item .danger {
+    min-width: 32px !important;
+    min-height: 34px !important;
+    height: 34px !important;
+    padding: 4px !important;
+  }
+
+  .messages,
+  #messageList {
+    gap: 8px !important;
+  }
+
+  .panel-chat .composer {
+    grid-template-columns: minmax(0, 1.35fr) minmax(170px, 0.9fr) !important;
+    flex: 0 0 min(38dvh, 170px) !important;
+    height: min(38dvh, 170px) !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    padding: 8px !important;
+    gap: 8px !important;
+    overflow-y: auto !important;
+  }
+
+  .panel-chat .composer textarea#messageInput {
+    display: block !important;
+    visibility: visible !important;
+    min-height: 64px !important;
+    max-height: 84px !important;
+    padding: 9px 10px !important;
+  }
+
+  .composer-main,
+  .composer-tools {
+    min-height: 0 !important;
+  }
+
+  .composer-tools {
+    max-height: 34dvh !important;
+    overflow-y: auto !important;
+  }
+
+  .composer-tool-card {
+    gap: 6px !important;
+    padding: 8px !important;
+  }
+
+  .composer-footer {
+    gap: 6px !important;
+  }
+
+  .composer-actions button {
+    min-height: 36px !important;
+    padding: 7px 10px !important;
   }
 }
