@@ -27,6 +27,7 @@ Optional environment variables:
 
 - `OPENAI_MODEL` (default: `gpt-4o-2024-11-20`)
 - `OPENAI_API_URL` (default: `https://api.openai.com/v1/responses`)
+- `OPENAI_SAFETY_IDENTIFIER` (optional stable per-user or per-installation identifier; hashed before being sent to OpenAI)
 - `CHATBOT_DB` (default: `chatbot.db`)
 - `CHATBOT_MAX_HISTORY` (default: `50`)
 - `CHATBOT_MAX_OUTPUT_TOKENS` (default: `800`)
@@ -35,6 +36,9 @@ Optional environment variables:
 - `CHATBOT_EMBEDDING_MODEL` (default: `text-embedding-3-small`)
 - `CHATBOT_EMBEDDINGS_TOP_K` (default: `6`)
 - `CHATBOT_ENABLE_WEB_SEARCH` (default: `1`)
+- `CHATBOT_MAX_OUTPUT_TOKENS` (default: `2000`; increase for long reasoning or coding requests)
+- `CHATBOT_OPENAI_RETRY_ATTEMPTS` (default: `2`; retries only transient connection, rate-limit, and 5xx failures)
+- `CHATBOT_OPENAI_RETRY_BACKOFF_SECONDS` (default: `1.0`; exponential retry backoff base)
 
 ## Run
 

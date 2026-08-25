@@ -46,6 +46,7 @@ from core import (
     delete_memory_suggestion,
     delete_memory_suggestions_from_message_id,
     deserialize_message_metadata,
+    ensure_file_search_documents_indexed,
     extract_message_attachment_cards,
     fetch_container_file_content,
     get_all_messages_with_ids,
@@ -93,6 +94,18 @@ from core import (
     update_scheduled_task_enabled,
     claim_scheduled_task_run,
 )
+
+
+def _prepare_file_search_for_turn(conn, messages) -> None:
+    """Index attachments only when this turn is actually asking to retrieve from them."""
+    try:
+        ensure_file_search_documents_indexed(conn, messages)
+    except Exception as exc:
+        logger.exception("File-search preparation failed")
+        raise ApiError(
+            "File search could not prepare the attachment. Check the server log and try again.",
+            HTTPStatus.BAD_GATEWAY,
+        ) from exc
 
 load_env_file(ENV_PATH)
 
@@ -745,6 +758,7 @@ def _run_scheduled_task(task_id: str) -> dict:
             current_user_message=user_message,
         )
         messages = [Message("system", system_prompt), *history, user_message]
+        _prepare_file_search_for_turn(conn, messages)
 
         response_text = call_openai(
             messages,
@@ -1045,6 +1059,28 @@ class ApiError(Exception):
         super().__init__(message)
         self.message = message
         self.status = status
+
+
+def assistant_error_message(exc: Exception) -> str:
+    """Return a useful user-facing message without exposing request contents."""
+    configured_message = str(getattr(exc, "user_message", "") or "").strip()
+    if configured_message:
+        request_id = str(getattr(exc, "request_id", "") or "").strip()
+        if request_id:
+            return f"{configured_message} (request {request_id})"
+        return configured_message
+
+    message = str(exc or "").lower()
+    if "max_output_tokens" in message or "output budget" in message:
+        return (
+            "The model used its response budget before producing a final answer. "
+            "Try a shorter message or lower the reasoning effort."
+        )
+    if "timed out" in message or "timeout" in message or "connection" in message:
+        return "Could not connect to OpenAI. Check the server network or proxy and try again."
+    if "429" in message:
+        return "OpenAI rate-limited this request. Please wait a moment and try again."
+    return "Assistant request failed. Check the server log for details and try again."
 
 
 class ChatHandler(BaseHTTPRequestHandler):
@@ -1752,6 +1788,16 @@ class ChatHandler(BaseHTTPRequestHandler):
             return "For this regeneration, spend extra effort checking the answer and resolving tricky parts carefully."
         return ""
 
+    def _get_regenerate_web_search_mode(self, payload: dict, original_content: str) -> str:
+        mode = str(payload.get("regenerate_web_search_mode") or "same").strip().lower()
+        if mode == "force":
+            return "force"
+        if mode == "off":
+            return "off"
+        if original_content.lower().startswith("/web "):
+            return "force"
+        return "auto" if bool(payload.get("enable_web_search", True)) else "off"
+
     def _parse_reinspect_message_ids(self, payload: dict) -> list[int]:
         parsed: list[int] = []
         seen = set()
@@ -2069,6 +2115,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 current_user_message=model_user_message,
             )
             messages = [Message("system", system_prompt), *history, model_user_message]
+            _prepare_file_search_for_turn(conn, messages)
 
             user_message_id = add_message_returning_id(conn, conversation_id, user_message)
             auto_extract_memory_suggestions_from_user_text(
@@ -2089,7 +2136,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 logger.exception("Model call failed for conversation %s", conversation_id)
                 raise ApiError(
-                    "Assistant request failed",
+                    assistant_error_message(exc),
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                 ) from exc
 
@@ -2205,6 +2252,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 current_user_message=model_user_message,
             )
             messages = [Message("system", system_prompt), *history, model_user_message]
+            _prepare_file_search_for_turn(conn, messages)
             user_message_id = add_message_returning_id(conn, conversation_id, user_message)
             auto_extract_memory_suggestions_from_user_text(
                 conn,
@@ -2266,12 +2314,12 @@ class ChatHandler(BaseHTTPRequestHandler):
                             },
                         }
                     )
-                except Exception:
+                except Exception as exc:
                     logger.exception(
                         "Reasoning send fallback failed for conversation %s",
                         conversation_id,
                     )
-                    self._send_sse_event({"type": "error", "error": "Assistant request failed"})
+                    self._send_sse_event({"type": "error", "error": assistant_error_message(exc)})
                 return
 
             full_text = ""
@@ -2348,9 +2396,9 @@ class ChatHandler(BaseHTTPRequestHandler):
                                 },
                             }
                         )
-            except Exception:
+            except Exception as exc:
                 logger.exception("Streaming model call failed for conversation %s", conversation_id)
-                self._send_sse_event({"type": "error", "error": "Assistant request failed"})
+                self._send_sse_event({"type": "error", "error": assistant_error_message(exc)})
 
     def _handle_edit_message(self, payload: dict) -> dict:
         conversation_id = payload.get("conversation_id")
@@ -2493,6 +2541,8 @@ class ChatHandler(BaseHTTPRequestHandler):
             )
             messages = [Message("system", system_prompt), *history, model_user_message]
 
+            _prepare_file_search_for_turn(conn, messages)
+
             try:
                 target_conversation_id = conversation_id
                 edited_user_message_id = message_id
@@ -2530,7 +2580,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                     conversation_id,
                 )
                 raise ApiError(
-                    "Assistant request failed",
+                    assistant_error_message(exc),
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                 ) from exc
 
@@ -2673,11 +2723,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 current_user_message=original_user_message,
             )
 
-            web_search_mode = "off"
-            if original_content.lower().startswith("/web "):
-                web_search_mode = "force"
-            elif bool(payload.get("enable_web_search", True)):
-                web_search_mode = "auto"
+            web_search_mode = self._get_regenerate_web_search_mode(payload, original_content)
 
             system_prompt = build_system_prompt(
                 conn,
@@ -2689,6 +2735,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             if regenerate_instruction:
                 system_prompt = f"{system_prompt}\n\n{regenerate_instruction}"
             messages = [Message("system", system_prompt), *history, original_user_message]
+            _prepare_file_search_for_turn(conn, messages)
 
             try:
                 response_text = call_openai(
@@ -2707,7 +2754,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                     conversation_id,
                 )
                 raise ApiError(
-                    "Assistant request failed",
+                    assistant_error_message(exc),
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                 ) from exc
 
@@ -2823,11 +2870,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 current_user_message=original_user_message,
             )
 
-            web_search_mode = "off"
-            if original_content.lower().startswith("/web "):
-                web_search_mode = "force"
-            elif bool(payload.get("enable_web_search", True)):
-                web_search_mode = "auto"
+            web_search_mode = self._get_regenerate_web_search_mode(payload, original_content)
 
             system_prompt = build_system_prompt(
                 conn,
@@ -2839,6 +2882,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             if regenerate_instruction:
                 system_prompt = f"{system_prompt}\n\n{regenerate_instruction}"
             messages = [Message("system", system_prompt), *history, original_user_message]
+            _prepare_file_search_for_turn(conn, messages)
 
             self._send_sse_headers()
 
@@ -2902,13 +2946,13 @@ class ChatHandler(BaseHTTPRequestHandler):
                             },
                         }
                     )
-                except Exception:
+                except Exception as exc:
                     logger.exception(
                         "Reasoning regenerate fallback failed for message %s in conversation %s",
                         message_id,
                         conversation_id,
                     )
-                    self._send_sse_event({"type": "error", "error": "Assistant request failed"})
+                    self._send_sse_event({"type": "error", "error": assistant_error_message(exc)})
                 return
 
             full_text = ""
@@ -3006,13 +3050,13 @@ class ChatHandler(BaseHTTPRequestHandler):
                                 },
                             }
                         )
-            except Exception:
+            except Exception as exc:
                 logger.exception(
                     "Streaming regenerate failed for message %s in conversation %s",
                     message_id,
                     conversation_id,
                 )
-                self._send_sse_event({"type": "error", "error": "Assistant request failed"})
+                self._send_sse_event({"type": "error", "error": assistant_error_message(exc)})
 
     def _handle_delete_conversation(self, conversation_id: str) -> dict:
         with connect_db() as conn:

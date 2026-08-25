@@ -2,6 +2,7 @@ import base64
 import hashlib
 import html
 import json
+import logging
 import math
 import mimetypes
 import os
@@ -17,14 +18,18 @@ from typing import Iterable, List, Optional, Tuple
 from urllib import error, request
 from urllib.parse import quote, urlencode, urljoin, urlparse
 
+logger = logging.getLogger(__name__)
+
 DB_PATH = os.environ.get("CHATBOT_DB", "chatbot.db")
 API_URL = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/responses")
 IMAGES_API_URL = os.environ.get("OPENAI_IMAGES_API_URL", "https://api.openai.com/v1/images/generations")
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-2024-11-20")
-IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
+IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-2")
 DEFAULT_REASONING_MODEL = os.environ.get("OPENAI_REASONING_MODEL", "gpt-5.1").strip() or "gpt-5.1"
 DEFAULT_REASONING_EFFORT = os.environ.get("OPENAI_REASONING_EFFORT", "medium").strip().lower() or "medium"
 MAX_HISTORY = int(os.environ.get("CHATBOT_MAX_HISTORY", "50"))
+PROMPT_MAX_HISTORY = max(1, int(os.environ.get("CHATBOT_PROMPT_MAX_HISTORY", str(MAX_HISTORY))))
+CONVERSATION_SUMMARY_ENABLED = os.environ.get("CHATBOT_CONVERSATION_SUMMARY", "1").lower() not in {"0", "false", "no"}
 MAX_OUTPUT_TOKENS = int(os.environ.get("CHATBOT_MAX_OUTPUT_TOKENS", "2000"))
 EMBEDDING_MODEL = os.environ.get("CHATBOT_EMBEDDING_MODEL", "text-embedding-3-small")
 EMBEDDINGS_ENABLED = os.environ.get("CHATBOT_USE_EMBEDDINGS", "1").lower() not in {"0", "false", "no"}
@@ -46,6 +51,11 @@ GITHUB_TOOL_MAX_SEARCH_RESULTS = int(os.environ.get("CHATBOT_GITHUB_MAX_SEARCH_R
 MAX_TOOL_ROUNDS = int(os.environ.get("CHATBOT_MAX_TOOL_ROUNDS", "8"))
 MAX_BUILTIN_TOOL_CALLS = max(1, int(os.environ.get("CHATBOT_MAX_BUILTIN_TOOL_CALLS", "6")))
 MAX_RESPONSE_CONTINUATIONS = max(1, int(os.environ.get("CHATBOT_MAX_RESPONSE_CONTINUATIONS", "3")))
+OPENAI_RETRY_ATTEMPTS = max(0, int(os.environ.get("CHATBOT_OPENAI_RETRY_ATTEMPTS", "2")))
+OPENAI_RETRY_BACKOFF_SECONDS = max(
+    0.1,
+    float(os.environ.get("CHATBOT_OPENAI_RETRY_BACKOFF_SECONDS", "1.0")),
+)
 ATTACHMENTS_DIR = os.environ.get("CHATBOT_ATTACHMENTS_DIR", "").strip()
 FILE_SEARCH_ENABLED = os.environ.get("CHATBOT_ENABLE_FILE_SEARCH", "1").lower() not in {"0", "false", "no"}
 FILE_SEARCH_MAX_RESULTS = int(os.environ.get("CHATBOT_FILE_SEARCH_MAX_RESULTS", "4"))
@@ -60,6 +70,27 @@ MODEL_MEMORY_SUGGESTIONS_ENABLED = os.environ.get("CHATBOT_MODEL_MEMORY_SUGGESTI
 MODEL_MEMORY_SUGGESTION_MODEL = os.environ.get("CHATBOT_MODEL_MEMORY_SUGGESTION_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
 MODEL_MEMORY_SUGGESTION_MAX = max(1, int(os.environ.get("CHATBOT_MODEL_MEMORY_SUGGESTION_MAX", "4")))
 MODEL_MEMORY_SUGGESTION_INPUT_CHARS = max(400, int(os.environ.get("CHATBOT_MODEL_MEMORY_SUGGESTION_INPUT_CHARS", "1800")))
+
+
+class OpenAIRequestError(RuntimeError):
+    """An OpenAI request failed with a user-safe explanation attached."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        user_message: str,
+        request_id: Optional[str] = None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.user_message = user_message
+        self.request_id = request_id or ""
+        self.retryable = retryable
+
+
+class IncompleteResponseError(OpenAIRequestError):
+    """The API returned no usable final answer after bounded recovery."""
 
 
 def _parse_model_list(raw_value: str) -> List[str]:
@@ -268,6 +299,16 @@ CREATE TABLE IF NOT EXISTS messages (
     FOREIGN KEY(conversation_id) REFERENCES conversations(id)
 );
 
+CREATE TABLE IF NOT EXISTS conversation_summaries (
+    conversation_id TEXT PRIMARY KEY,
+    through_message_id INTEGER NOT NULL,
+    message_count INTEGER NOT NULL,
+    summary TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     content TEXT NOT NULL,
@@ -286,6 +327,13 @@ CREATE TABLE IF NOT EXISTS memory_embeddings (
     embedding TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS embedding_cache (
+    text_hash TEXT PRIMARY KEY,
+    input_text TEXT NOT NULL,
+    embedding TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS memory_suggestions (
@@ -477,6 +525,56 @@ def connect_db() -> sqlite3.Connection:
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     ensure_attachments_dir()
+
+    embedding_cache_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(embedding_cache)").fetchall()
+    }
+    required_embedding_cache_columns = {"text_hash", "input_text", "embedding", "updated_at"}
+    if embedding_cache_columns and not required_embedding_cache_columns.issubset(embedding_cache_columns):
+        legacy_rows = conn.execute("SELECT * FROM embedding_cache").fetchall()
+        legacy_column_names = set(embedding_cache_columns)
+        legacy_text_column = next(
+            (
+                name
+                for name in ("input_text", "text", "content", "query")
+                if name in legacy_column_names
+            ),
+            None,
+        )
+        legacy_embedding_column = "embedding" if "embedding" in legacy_column_names else None
+        conn.execute("ALTER TABLE embedding_cache RENAME TO embedding_cache_legacy")
+        conn.execute(
+            """
+            CREATE TABLE embedding_cache (
+                text_hash TEXT PRIMARY KEY,
+                input_text TEXT NOT NULL,
+                embedding TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        if legacy_text_column and legacy_embedding_column:
+            for row in legacy_rows:
+                input_text = str(row[legacy_text_column] or "")
+                embedding = str(row[legacy_embedding_column] or "")
+                if not input_text or not embedding:
+                    continue
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO embedding_cache
+                        (text_hash, input_text, embedding, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        hashlib.sha256(input_text.encode("utf-8")).hexdigest(),
+                        input_text,
+                        embedding,
+                        now_iso(),
+                    ),
+                )
+        conn.execute("DROP TABLE embedding_cache_legacy")
+        conn.commit()
 
     columns = {
         row["name"]
@@ -1345,6 +1443,32 @@ def upsert_memory_embedding(
     conn.commit()
 
 
+def get_or_create_embedding(conn: sqlite3.Connection, input_text: str) -> List[float]:
+    normalized_text = str(input_text or "")
+    text_hash = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()
+    row = conn.execute(
+        "SELECT embedding FROM embedding_cache WHERE text_hash = ? LIMIT 1",
+        (text_hash,),
+    ).fetchone()
+    if row:
+        return list(json.loads(row["embedding"]))
+
+    embedding = call_openai_embeddings(normalized_text)
+    conn.execute(
+        """
+        INSERT INTO embedding_cache (text_hash, input_text, embedding, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(text_hash) DO UPDATE SET
+            input_text = excluded.input_text,
+            embedding = excluded.embedding,
+            updated_at = excluded.updated_at
+        """,
+        (text_hash, normalized_text, json.dumps(embedding), now_iso()),
+    )
+    conn.commit()
+    return embedding
+
+
 def add_memory(
     conn: sqlite3.Connection,
     content: str,
@@ -1384,7 +1508,7 @@ def add_memory(
     conn.commit()
 
     if EMBEDDINGS_ENABLED and memory_id is not None:
-        embedding = call_openai_embeddings(content)
+        embedding = get_or_create_embedding(conn, content)
         upsert_memory_embedding(conn, memory_id, embedding)
 
 
@@ -2142,8 +2266,6 @@ def clear_memories(conn: sqlite3.Connection) -> None:
 
 
 def add_message(conn: sqlite3.Connection, conversation_id: str, message: Message) -> None:
-    if message.role == "user":
-        index_message_documents(conn, message)
     content, raw_content = serialize_message_content(message.content)
     metadata = serialize_message_metadata(message.metadata)
     now = now_iso()
@@ -2162,8 +2284,6 @@ def add_message(conn: sqlite3.Connection, conversation_id: str, message: Message
 def add_message_returning_id(
     conn: sqlite3.Connection, conversation_id: str, message: Message
 ) -> int:
-    if message.role == "user":
-        index_message_documents(conn, message)
     content, raw_content = serialize_message_content(message.content)
     metadata = serialize_message_metadata(message.metadata)
     now = now_iso()
@@ -2940,6 +3060,157 @@ def _fetch_github_readme(owner: str, repo: str, ref: str) -> str:
     return truncate_text(decoded, min(REMOTE_TEXT_CHAR_LIMIT // 2, 20000))
 
 
+def _github_api_text(url: str) -> dict:
+    payload, _ = _http_get(url, accept="application/vnd.github+json")
+    return json.loads(payload.decode("utf-8"))
+
+
+def _github_user_login(value: object) -> str:
+    if not isinstance(value, dict):
+        return ""
+    return str(value.get("login") or "").strip()
+
+
+def _github_label_names(value: object) -> str:
+    if not isinstance(value, list):
+        return ""
+    names = []
+    for item in value:
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+        else:
+            name = str(item or "").strip()
+        if name:
+            names.append(name)
+    return ", ".join(names[:12])
+
+
+def _fetch_github_issue_comments(owner: str, repo: str, number: int) -> List[str]:
+    comments_url = f"{_github_repo_api_base(owner, repo)}/issues/{number}/comments?per_page=10"
+    try:
+        comments = _github_api_text(comments_url)
+    except Exception:
+        return []
+    if not isinstance(comments, list):
+        return []
+
+    lines = []
+    for index, comment in enumerate(comments[:10], start=1):
+        if not isinstance(comment, dict):
+            continue
+        author = _github_user_login(comment.get("user")) or "unknown"
+        created_at = str(comment.get("created_at") or "").strip()
+        body = truncate_text(str(comment.get("body") or "").strip(), 3000)
+        if not body:
+            continue
+        header = f"Comment {index} by {author}"
+        if created_at:
+            header += f" at {created_at}"
+        lines.append(f"{header}:\n{body}")
+    return lines
+
+
+def _build_github_issue_block(url: str, owner: str, repo: str, number: int) -> dict:
+    issue_url = f"{_github_repo_api_base(owner, repo)}/issues/{number}"
+    issue = _github_api_text(issue_url)
+    title = str(issue.get("title") or "").strip()
+    state = str(issue.get("state") or "").strip()
+    author = _github_user_login(issue.get("user"))
+    created_at = str(issue.get("created_at") or "").strip()
+    updated_at = str(issue.get("updated_at") or "").strip()
+    labels = _github_label_names(issue.get("labels"))
+    body = truncate_text(str(issue.get("body") or "").strip(), 12000)
+    comments = _fetch_github_issue_comments(owner, repo, number)
+
+    lines = [
+        f"GitHub issue {owner}/{repo}#{number}",
+        f"Source URL: {url}",
+    ]
+    if title:
+        lines.append(f"Title: {title}")
+    if state:
+        lines.append(f"State: {state}")
+    if author:
+        lines.append(f"Author: {author}")
+    if created_at:
+        lines.append(f"Created: {created_at}")
+    if updated_at:
+        lines.append(f"Updated: {updated_at}")
+    if labels:
+        lines.append(f"Labels: {labels}")
+    if body:
+        lines.extend(["", "Issue body:", body])
+    if comments:
+        lines.extend(["", "Recent issue comments:"])
+        lines.extend(comments)
+
+    return {
+        "type": "input_text",
+        "text": "\n".join(lines).strip(),
+    }
+
+
+def _build_github_pull_block(url: str, owner: str, repo: str, number: int) -> dict:
+    pull_url = f"{_github_repo_api_base(owner, repo)}/pulls/{number}"
+    pull = _github_api_text(pull_url)
+    issue = {}
+    try:
+        issue = _github_api_text(f"{_github_repo_api_base(owner, repo)}/issues/{number}")
+    except Exception:
+        issue = {}
+
+    title = str(pull.get("title") or issue.get("title") or "").strip()
+    state = str(pull.get("state") or issue.get("state") or "").strip()
+    author = _github_user_login(pull.get("user") or issue.get("user"))
+    created_at = str(pull.get("created_at") or issue.get("created_at") or "").strip()
+    updated_at = str(pull.get("updated_at") or issue.get("updated_at") or "").strip()
+    base = pull.get("base") if isinstance(pull.get("base"), dict) else {}
+    head = pull.get("head") if isinstance(pull.get("head"), dict) else {}
+    base_ref = str(base.get("ref") or "").strip()
+    head_ref = str(head.get("ref") or "").strip()
+    changed_files = pull.get("changed_files")
+    additions = pull.get("additions")
+    deletions = pull.get("deletions")
+    body = truncate_text(str(pull.get("body") or issue.get("body") or "").strip(), 12000)
+    comments = _fetch_github_issue_comments(owner, repo, number)
+
+    lines = [
+        f"GitHub pull request {owner}/{repo}#{number}",
+        f"Source URL: {url}",
+    ]
+    if title:
+        lines.append(f"Title: {title}")
+    if state:
+        lines.append(f"State: {state}")
+    if author:
+        lines.append(f"Author: {author}")
+    if created_at:
+        lines.append(f"Created: {created_at}")
+    if updated_at:
+        lines.append(f"Updated: {updated_at}")
+    if base_ref or head_ref:
+        lines.append(f"Branches: {head_ref or '?'} -> {base_ref or '?'}")
+    stats = []
+    if changed_files is not None:
+        stats.append(f"{changed_files} changed files")
+    if additions is not None:
+        stats.append(f"+{additions}")
+    if deletions is not None:
+        stats.append(f"-{deletions}")
+    if stats:
+        lines.append(f"Stats: {', '.join(str(item) for item in stats)}")
+    if body:
+        lines.extend(["", "Pull request body:", body])
+    if comments:
+        lines.extend(["", "Recent PR conversation comments:"])
+        lines.extend(comments)
+
+    return {
+        "type": "input_text",
+        "text": "\n".join(lines).strip(),
+    }
+
+
 def _build_github_tree_block(url: str, owner: str, repo: str, ref: str, subpath: str = "") -> dict:
     tree_url = f"{_github_repo_api_base(owner, repo)}/git/trees/{quote(ref, safe='')}?recursive=1"
     payload, _ = _http_get(tree_url, accept="application/vnd.github+json")
@@ -3014,6 +3285,25 @@ def resolve_remote_reference(url: str) -> Optional[dict]:
             ref = path_parts[3]
             subpath = "/".join(path_parts[4:])
             return _build_github_tree_block(url, owner, repo, ref, subpath)
+
+        if len(path_parts) >= 4 and path_parts[2] == "issues":
+            try:
+                number = int(path_parts[3])
+            except (TypeError, ValueError):
+                return None
+            if number > 0:
+                return _build_github_issue_block(url, owner, repo, number)
+
+        if len(path_parts) >= 4 and path_parts[2] in {"pull", "pulls"}:
+            try:
+                number = int(path_parts[3])
+            except (TypeError, ValueError):
+                return None
+            if number > 0:
+                return _build_github_pull_block(url, owner, repo, number)
+
+        if len(path_parts) > 2:
+            return None
 
         repo_api_url = _github_repo_api_base(owner, repo)
         payload, _ = _http_get(repo_api_url, accept="application/vnd.github+json")
@@ -3154,9 +3444,14 @@ def get_recent_message_rows_with_ids(conn: sqlite3.Connection, conversation_id: 
         ORDER BY id DESC
         LIMIT ?
         """,
-        (conversation_id, MAX_HISTORY),
+        (conversation_id, PROMPT_MAX_HISTORY),
     ).fetchall()
     return list(reversed(rows))
+
+
+def get_prompt_history_rows_with_ids(conn: sqlite3.Connection, conversation_id: str) -> List[sqlite3.Row]:
+    """Return the bounded message window used to build a model prompt."""
+    return get_recent_message_rows_with_ids(conn, conversation_id)
 
 
 def build_replay_history_from_rows(
@@ -3271,7 +3566,6 @@ def replace_message_from_id(
     if row["role"] != "user":
         raise ValueError("Only user messages can be edited")
 
-    index_message_documents(conn, new_message)
     delete_memory_suggestions_from_message_id(conn, conversation_id, message_id, include_current=True)
     content, raw_content = serialize_message_content(new_message.content)
     metadata = serialize_message_metadata(new_message.metadata)
@@ -3417,6 +3711,9 @@ def query_requests_attachment_reinspection(query: Optional[str]) -> bool:
         "process",
         "review",
         "check",
+        "search",
+        "find",
+        "quote",
     )
     if any(term in normalized for term in action_terms) and any(term in normalized for term in attachment_terms):
         return True
@@ -3652,12 +3949,12 @@ def find_relevant_memories(
         )
         return ordered[: max(1, top_k)]
 
-    query_embedding = call_openai_embeddings(query)
+    query_embedding = get_or_create_embedding(conn, query)
 
     scored = []
     for memory, emb_raw in candidates:
         if emb_raw is None:
-            memory_embedding = call_openai_embeddings(memory.content)
+            memory_embedding = get_or_create_embedding(conn, memory.content)
             upsert_memory_embedding(conn, memory.id, memory_embedding)
         else:
             memory_embedding = json.loads(emb_raw)
@@ -3678,12 +3975,58 @@ def find_relevant_memories(
     return best
 
 
+def _build_conversation_summary_text(rows: Iterable[sqlite3.Row]) -> str:
+    lines: List[str] = []
+    for row in rows:
+        content = re.sub(r"\s+", " ", str(row["content"] or "")).strip()
+        if not content:
+            continue
+        content = re.sub(r"\[image\]", "(image)", content, flags=re.IGNORECASE)
+        content = re.sub(r"\[file(?::[^\]]+)?\]", "(file)", content, flags=re.IGNORECASE)
+        if len(content) > 400:
+            content = content[:397].rstrip() + "..."
+        lines.append(f"- {str(row['role'] or 'message').title()}: {content}")
+    return "\n".join(lines)
+
+
+def get_or_create_conversation_summary(
+    conn: sqlite3.Connection,
+    conversation_id: str,
+    older_rows: Iterable[sqlite3.Row],
+) -> Optional[str]:
+    rows = list(older_rows)
+    if not CONVERSATION_SUMMARY_ENABLED or not rows:
+        return None
+
+    summary = _build_conversation_summary_text(rows)
+    if not summary:
+        return None
+
+    now = now_iso()
+    conn.execute(
+        """
+        INSERT INTO conversation_summaries (
+            conversation_id, through_message_id, message_count, summary, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(conversation_id) DO UPDATE SET
+            through_message_id = excluded.through_message_id,
+            message_count = excluded.message_count,
+            summary = excluded.summary,
+            updated_at = excluded.updated_at
+        """,
+        (conversation_id, int(rows[-1]["id"]), len(rows), summary, now, now),
+    )
+    conn.commit()
+    return summary
+
+
 def build_system_prompt(
     conn: sqlite3.Connection,
     query: Optional[str] = None,
     *,
     conversation_id: Optional[str] = None,
     current_user_message: Optional[Message] = None,
+    recent_history_rows: Optional[Iterable[sqlite3.Row]] = None,
 ) -> str:
     if query and EMBEDDINGS_ENABLED:
         memories = find_relevant_memories(conn, query, conversation_id=conversation_id)
@@ -3720,6 +4063,22 @@ def build_system_prompt(
     )
 
     prompt = SYSTEM_PROMPT_TEMPLATE.format(memories=memories_text) + calendar_context
+    if conversation_id and CONVERSATION_SUMMARY_ENABLED and recent_history_rows is not None:
+        recent_rows = list(recent_history_rows)
+        if recent_rows:
+            first_recent_id = int(recent_rows[0]["id"])
+            older_rows = conn.execute(
+                """
+                SELECT id, role, content
+                FROM messages
+                WHERE conversation_id = ? AND id < ?
+                ORDER BY id ASC
+                """,
+                (conversation_id, first_recent_id),
+            ).fetchall()
+            summary = get_or_create_conversation_summary(conn, conversation_id, older_rows)
+            if summary:
+                prompt += f"\n\nEarlier conversation summary:\n{summary}"
     prompt += build_historical_media_text_guard_prompt(current_user_message)
     prompt += build_recent_attachment_guard_prompt(
         conn,
@@ -3739,6 +4098,7 @@ def _response_tools(
     web_search_mode: str,
     enable_code_interpreter: bool,
     *,
+    enable_file_search: bool = True,
     enable_github_tools: bool,
 ) -> tuple[list, Optional[str]]:
     normalized_mode = (web_search_mode or "off").strip().lower()
@@ -3762,8 +4122,8 @@ def _response_tools(
             }
         )
 
-    active_vector_store_id = get_active_vector_store_id()
-    if active_vector_store_id:
+    active_vector_store_id = get_active_vector_store_id() if enable_file_search else ""
+    if enable_file_search and active_vector_store_id:
         tools.append(
             {
                 "type": "file_search",
@@ -3836,6 +4196,7 @@ def _call_openai_response(payload: dict, *, timeout: int = 90) -> dict:
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
 
+    _apply_safety_identifier(payload)
     data = json.dumps(payload).encode("utf-8")
     req = request.Request(
         API_URL,
@@ -3847,12 +4208,55 @@ def _call_openai_response(payload: dict, *, timeout: int = 90) -> dict:
         },
     )
 
-    try:
-        with request.urlopen(req, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except error.HTTPError as http_error:
-        detail = http_error.read().decode("utf-8")
-        raise RuntimeError(f"OpenAI API error ({http_error.code}): {detail}") from http_error
+    for attempt in range(OPENAI_RETRY_ATTEMPTS + 1):
+        try:
+            with request.urlopen(req, timeout=timeout) as response:
+                response_data = json.loads(response.read().decode("utf-8"))
+                request_id = str(response.headers.get("x-request-id") or "").strip()
+                if request_id and isinstance(response_data, dict):
+                    response_data["_request_id"] = request_id
+                if isinstance(response_data, dict):
+                    usage = response_data.get("usage") or {}
+                    logger.info(
+                        "OpenAI response model=%s status=%s input_tokens=%s output_tokens=%s request_id=%s",
+                        response_data.get("model") or payload.get("model") or "unknown",
+                        response_data.get("status") or "unknown",
+                        usage.get("input_tokens", "unknown"),
+                        usage.get("output_tokens", "unknown"),
+                        request_id or "unknown",
+                    )
+                return response_data
+        except error.HTTPError as http_error:
+            detail = http_error.read().decode("utf-8", errors="replace")
+            request_id = str(http_error.headers.get("x-request-id") or "").strip()
+            retryable = http_error.code == 429 or 500 <= http_error.code < 600
+            if retryable and attempt < OPENAI_RETRY_ATTEMPTS:
+                time.sleep(OPENAI_RETRY_BACKOFF_SECONDS * (2**attempt))
+                continue
+            suffix = f" request_id={request_id}" if request_id else ""
+            user_message = {
+                400: "OpenAI rejected the request. The message or selected options may be too large or invalid.",
+                401: "OpenAI authentication failed. Check the API key on the server.",
+                403: "OpenAI denied this request. Check the project, model access, and account settings.",
+                429: "OpenAI rate-limited this request. Please wait a moment and try again.",
+            }.get(
+                http_error.code,
+                "OpenAI returned a temporary server error. Please try again shortly.",
+            )
+            raise OpenAIRequestError(
+                f"OpenAI API error ({http_error.code}){suffix}: {detail}",
+                user_message=user_message,
+                request_id=request_id,
+                retryable=retryable,
+            ) from http_error
+        except (error.URLError, TimeoutError) as exc:
+            if attempt < OPENAI_RETRY_ATTEMPTS:
+                time.sleep(OPENAI_RETRY_BACKOFF_SECONDS * (2**attempt))
+                continue
+            raise OpenAIRequestError(
+                f"OpenAI connection failed after {attempt + 1} attempts: {exc}",
+                user_message="Could not connect to OpenAI. Check the server network or proxy and try again.",
+            ) from exc
 
 
 def _apply_built_in_tool_limits(payload: dict, *, has_tools: bool) -> None:
@@ -3860,6 +4264,15 @@ def _apply_built_in_tool_limits(payload: dict, *, has_tools: bool) -> None:
         return
     payload["parallel_tool_calls"] = False
     payload["max_tool_calls"] = MAX_BUILTIN_TOOL_CALLS
+
+
+def _apply_safety_identifier(payload: dict) -> None:
+    """Attach a stable, privacy-preserving end-user identifier when configured."""
+    configured_identifier = os.environ.get("OPENAI_SAFETY_IDENTIFIER", "").strip()
+    if configured_identifier:
+        payload["safety_identifier"] = hashlib.sha256(
+            configured_identifier.encode("utf-8")
+        ).hexdigest()
 
 
 def _openai_api_get_json(url: str, *, timeout: int = 90) -> dict:
@@ -4168,6 +4581,7 @@ def index_message_documents(conn: sqlite3.Connection, message: Message) -> None:
                 ),
             )
             conn.commit()
+
         except Exception as exc:
             conn.execute(
                 """
@@ -4198,6 +4612,33 @@ def index_message_documents(conn: sqlite3.Connection, message: Message) -> None:
                 ),
             )
             conn.commit()
+
+
+def should_enable_file_search(messages: Iterable[Message]) -> bool:
+    for message in reversed(list(messages)):
+        if message.role != "user":
+            continue
+        if message_content_has_inspectable_attachments(message.content):
+            return True
+        return query_requests_attachment_reinspection(summarize_content(message.content))
+    return False
+
+
+def ensure_file_search_documents_indexed(
+    conn: sqlite3.Connection,
+    messages: Iterable[Message],
+) -> bool:
+    message_list = list(messages)
+    if not FILE_SEARCH_ENABLED or not should_enable_file_search(message_list):
+        return False
+
+    indexed = False
+    for message in message_list:
+        if message.role != "user" or not extract_indexable_documents(message.content):
+            continue
+        index_message_documents(conn, message)
+        indexed = True
+    return indexed
 
 
 def get_active_vector_store_id() -> str:
@@ -4696,6 +5137,21 @@ def _finalize_response_result(
             reasoning_effort=reasoning_effort,
             image_previews=image_previews,
         )
+    status = str(response_data.get("status") or "").strip().lower()
+    incomplete_reason = str(
+        (response_data.get("incomplete_details") or {}).get("reason") or ""
+    ).strip().lower()
+    if status == "incomplete" and incomplete_reason == "max_output_tokens":
+        raise IncompleteResponseError(
+            f"Response exhausted max_output_tokens without final text: {response_data.get('id')}",
+            user_message=(
+                "The model used its response budget before producing a final answer. "
+                "Try a shorter message or lower the reasoning effort."
+            ),
+            request_id=str(
+                response_data.get("_request_id") or response_data.get("id") or ""
+            ).strip(),
+        )
     raise RuntimeError(f"Unexpected API response format: {response_data}")
 
 
@@ -4805,6 +5261,20 @@ def _complete_response_text_if_needed(
             combined_text = f"{combined_text}{continuation_text}" if combined_text else continuation_text
         current_response = next_response
 
+    if not combined_text and _response_incomplete_due_to_max_tokens(current_response):
+        try:
+            fallback_response = _force_final_text_response(
+                str(current_response.get("id") or "").strip(),
+                model=model,
+                reasoning_effort="low",
+            )
+        except Exception:
+            fallback_response = None
+        if isinstance(fallback_response, dict):
+            fallback_text = extract_response_text(fallback_response)
+            if fallback_text:
+                return fallback_response, fallback_text
+
     return current_response, combined_text or None
 
 
@@ -4825,10 +5295,12 @@ def _run_openai_response_loop(
         else None
     )
     github_tools_active = should_enable_github_tools(message_list)
+    file_search_active = should_enable_file_search(message_list)
     tools_used: List[str] = []
     tools, tool_choice = _response_tools(
         web_search_mode,
         enable_code_interpreter,
+        enable_file_search=file_search_active,
         enable_github_tools=github_tools_active,
     )
     input_items = [_message_to_response_input(message) for message in message_list]
@@ -4993,7 +5465,7 @@ def call_openai(
     )
 
 
-def stream_openai(
+def _stream_openai_once(
     messages: Iterable[Message],
     web_search_mode: str = "off",
     enable_code_interpreter: bool = True,
@@ -5008,11 +5480,13 @@ def stream_openai(
         else None
     )
     if should_enable_github_tools(message_list):
+        file_search_active = should_enable_file_search(message_list)
         tools_used: List[str] = []
         activity_log: List[dict] = []
         tools, tool_choice = _response_tools(
             web_search_mode,
             enable_code_interpreter,
+            enable_file_search=file_search_active,
             enable_github_tools=True,
         )
         input_items = [_message_to_response_input(message) for message in message_list]
@@ -5166,6 +5640,7 @@ def stream_openai(
     tools, tool_choice = _response_tools(
         web_search_mode,
         enable_code_interpreter,
+        enable_file_search=should_enable_file_search(message_list),
         enable_github_tools=False,
     )
     if tools:
@@ -5173,6 +5648,7 @@ def stream_openai(
     if tool_choice:
         payload["tool_choice"] = tool_choice
     _apply_built_in_tool_limits(payload, has_tools=bool(tools))
+    _apply_safety_identifier(payload)
 
     data = json.dumps(payload).encode("utf-8")
     req = request.Request(
@@ -5191,6 +5667,12 @@ def stream_openai(
 
     try:
         with request.urlopen(req, timeout=180) as response:
+            stream_request_id = str(response.headers.get("x-request-id") or "").strip()
+            logger.info(
+                "OpenAI streaming request started model=%s request_id=%s",
+                resolved_model,
+                stream_request_id or "unknown",
+            )
             for raw_line in response:
                 line = raw_line.decode("utf-8").strip()
                 if not line or not line.startswith("data:"):
@@ -5224,9 +5706,31 @@ def stream_openai(
                             yield {"type": "status", "status": activity["tool"]}
                 elif event_type == "response.completed":
                     completed_response = event.get("response")
+                    if isinstance(completed_response, dict) and stream_request_id:
+                        completed_response["_request_id"] = stream_request_id
     except error.HTTPError as http_error:
-        detail = http_error.read().decode("utf-8")
-        raise RuntimeError(f"OpenAI API error ({http_error.code}): {detail}") from http_error
+        detail = http_error.read().decode("utf-8", errors="replace")
+        request_id = str(http_error.headers.get("x-request-id") or "").strip()
+        suffix = f" request_id={request_id}" if request_id else ""
+        status = http_error.code
+        user_message = {
+            400: "OpenAI rejected the request. The message or selected options may be too large or invalid.",
+            401: "OpenAI authentication failed. Check the API key on the server.",
+            403: "OpenAI denied this request. Check the project, model access, and account settings.",
+            429: "OpenAI rate-limited this request. Please wait a moment and try again.",
+        }.get(status, "OpenAI returned a temporary server error. Please try again shortly.")
+        raise OpenAIRequestError(
+            f"OpenAI API error ({status}){suffix}: {detail}",
+            user_message=user_message,
+            request_id=request_id,
+            retryable=status == 429 or status >= 500,
+        ) from http_error
+    except (error.URLError, TimeoutError) as exc:
+        raise OpenAIRequestError(
+            f"OpenAI streaming connection failed: {exc}",
+            user_message="Could not connect to OpenAI. Check the server network or proxy and try again.",
+            retryable=True,
+        ) from exc
 
     full_text = "".join(text_chunks).strip()
     tools_used: List[str] = []
@@ -5302,6 +5806,18 @@ def stream_openai(
         }
         return
 
+    if not full_text and isinstance(completed_response, dict) and _response_incomplete_due_to_max_tokens(completed_response):
+        raise IncompleteResponseError(
+            f"Streaming response exhausted max_output_tokens without final text: {completed_response.get('id')}",
+            user_message=(
+                "The model used its response budget before producing a final answer. "
+                "Try a shorter message or lower the reasoning effort."
+            ),
+            request_id=str(
+                completed_response.get("_request_id") or completed_response.get("id") or ""
+            ).strip(),
+        )
+
     final_activity_log = normalize_activity_log(activity_log)
     if not final_activity_log:
         final_activity_log = build_activity_log_from_tools(tools_used)
@@ -5321,6 +5837,33 @@ def stream_openai(
         "reasoning_effort": normalized_reasoning_effort,
         "image_previews": image_previews,
     }
+
+
+def stream_openai(
+    messages: Iterable[Message],
+    web_search_mode: str = "off",
+    enable_code_interpreter: bool = True,
+    model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+):
+    """Stream a response, retrying only before any output has been emitted."""
+    for attempt in range(OPENAI_RETRY_ATTEMPTS + 1):
+        emitted_event = False
+        try:
+            for event in _stream_openai_once(
+                messages,
+                web_search_mode=web_search_mode,
+                enable_code_interpreter=enable_code_interpreter,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            ):
+                emitted_event = True
+                yield event
+            return
+        except OpenAIRequestError as exc:
+            if not exc.retryable or emitted_event or attempt >= OPENAI_RETRY_ATTEMPTS:
+                raise
+            time.sleep(OPENAI_RETRY_BACKOFF_SECONDS * (2**attempt))
 
 
 def call_openai_image(
